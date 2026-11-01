@@ -15,6 +15,17 @@ sextant --socket ... mine diamond_ore --count 16
 sextant --socket ... --cache world.sxrg eta 120 64 -40
 sextant --socket ... waypoint save home
 sextant --socket ... waypoint go home
+sextant --socket ... craft sticks --times 4
+sextant --socket ... farm wheat carrots --rounds 3
+sextant --socket ... build house.json --origin 0 64 0
+sextant --socket ... follow minecraft:pig --rounds 20
+sextant --socket ... explore --legs 12 --leg-length 64
+sextant --socket ... tunnel 120 64 -40
+sextant --socket ... surface
+sextant --socket ... axis east --distance 500
+sextant --socket ... find diamond_ore --search-radius 128
+sextant --socket ... portal 10 64 10
+sextant --socket ... capabilities
 sextant styles                               # the presets and their knobs
 ```
 
@@ -47,6 +58,16 @@ sextant styles                               # the presets and their knobs
 - **Sprint-jumps**: long flat runs use two-block sprint jumps when the route and headroom allow it.
 - **Blueprints**: the library validates JSON blueprints, orders supports before walls, and rotates them
   around Y for a future live builder.
+- **Builds**: `build` accepts Sextant JSON blueprints and Sponge `.schem` files, places supports first,
+  skips occupied targets, and reports missing materials.
+- **Farms**: `farm` harvests and replants mature wheat, carrots, potatoes, and beetroot crops.
+- **Navigation commands**: `tunnel`, `surface`, `axis`, `find`, `invert`, and `explore` cover common
+  Baritone-style movement goals; `follow` tracks nearby mobs or items.
+- **Tasks and fleets**: `pause` preserves a task for `resume`, and `--reservation` atomically claims a
+  shared work-area file so multiple Flotilla bots do not take the same job.
+- **Travel**: `portal` waits for a dimension change. `capabilities` reports swimming, portal, vehicle,
+  and Elytra support exposed by the connected Horizon build; vehicle and flight controls require Horizon
+  commands that are not currently available.
 
 ## Styles
 
@@ -83,11 +104,16 @@ It needs a Horizon whose control socket answers commands sent together in one fr
 [Solenopsisbot/horizon](https://github.com/Solenopsisbot/horizon)'s `main`): steering one tick at a time needs
 it.
 
+The control socket is the compatibility boundary. Sextant never writes directly to a game save or assumes a
+particular renderer. It treats unread terrain as unknown, namespaces cache files per world/dimension in the
+calling application, and releases movement keys when a command exits with an error.
+
 ## Building
 
 ```sh
 cargo build --release   # target/release/sextant
 cargo test
+cargo clippy -- -D warnings
 ```
 
 Clean-room: written from Minecraft's movement rules, not from another pathfinder's code.

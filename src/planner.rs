@@ -391,6 +391,7 @@ struct Open {
     f: f32,
     g: f32,
     p: Pos,
+    placed_floor: bool,
 }
 impl Eq for Open {}
 impl Ord for Open {
@@ -446,25 +447,34 @@ fn search(
 ) -> Result<Path, String> {
     let per_block = if settings.sprint { SPRINT } else { WALK };
     let mut open = BinaryHeap::new();
-    let mut best_g: HashMap<Pos, f32> = HashMap::new();
-    let mut came: HashMap<Pos, (Pos, Step)> = HashMap::new();
+    type State = (Pos, bool);
+    let mut best_g: HashMap<State, f32> = HashMap::new();
+    let mut came: HashMap<State, (State, Step)> = HashMap::new();
     let h0 = heuristic(start, &goal, per_block);
     open.push(Open {
         f: h0,
         g: 0.0,
         p: start,
+        placed_floor: false,
     });
-    best_g.insert(start, 0.0);
-    let (mut closest, mut closest_h) = (start, h0);
+    best_g.insert((start, false), 0.0);
+    let (mut closest, mut closest_h) = ((start, false), h0);
     let mut explored = 0;
     let mut steps = Vec::new();
     let mut reached = None;
-    while let Some(Open { g, p, .. }) = open.pop() {
-        if g > best_g.get(&p).copied().unwrap_or(f32::INFINITY) {
+    while let Some(Open {
+        g, p, placed_floor, ..
+    }) = open.pop()
+    {
+        if g > best_g
+            .get(&(p, placed_floor))
+            .copied()
+            .unwrap_or(f32::INFINITY)
+        {
             continue;
         }
         if goal.reached(p) {
-            reached = Some(p);
+            reached = Some((p, placed_floor));
             break;
         }
         explored += 1;
@@ -473,32 +483,32 @@ fn search(
         }
         let h = heuristic(p, &goal, per_block);
         if h < closest_h {
-            (closest, closest_h) = (p, h);
+            (closest, closest_h) = ((p, placed_floor), h);
         }
         steps.clear();
-        let placed_floor = came
-            .get(&p)
-            .is_some_and(|(_, s)| s.place == Some(add(p, [0, -1, 0])));
         expand(p, placed_floor, &mut steps)?;
         for (step, cost) in steps.drain(..) {
             let ng = g + cost;
-            if ng < best_g.get(&step.to).copied().unwrap_or(f32::INFINITY) {
-                best_g.insert(step.to, ng);
+            let next_placed = step.place == Some(add(step.to, [0, -1, 0]));
+            let next_state = (step.to, next_placed);
+            if ng < best_g.get(&next_state).copied().unwrap_or(f32::INFINITY) {
+                best_g.insert(next_state, ng);
                 open.push(Open {
                     // A small greedy bias keeps long-range searches responsive while still
                     // preferring routes whose movement cost is close to optimal.
                     f: ng + heuristic(step.to, &goal, per_block) * 2.0,
                     g: ng,
                     p: step.to,
+                    placed_floor: next_placed,
                 });
-                came.insert(step.to, (p, step));
+                came.insert(next_state, ((p, placed_floor), step));
             }
         }
     }
-    let end = reached.unwrap_or(closest);
+    let end_state = reached.unwrap_or(closest);
     let mut route = Vec::new();
-    let mut at = end;
-    while at != start {
+    let mut at = end_state;
+    while at.0 != start {
         let Some((from, step)) = came.get(&at) else {
             break;
         };
@@ -509,7 +519,7 @@ fn search(
     Ok(Path {
         steps: route,
         complete: reached.is_some(),
-        cost: best_g.get(&end).copied().unwrap_or(0.0),
+        cost: best_g.get(&end_state).copied().unwrap_or(0.0),
         explored,
     })
 }

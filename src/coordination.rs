@@ -1,5 +1,6 @@
 //! Small cross-process reservations for Flotilla fleets.
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Reservation {
     path: PathBuf,
@@ -7,7 +8,30 @@ pub struct Reservation {
 
 impl Reservation {
     pub fn acquire(path: impl AsRef<Path>, owner: &str) -> Result<Self, String> {
+        Self::acquire_with_ttl(path, owner, 24 * 60 * 60)
+    }
+
+    pub fn acquire_with_ttl(
+        path: impl AsRef<Path>,
+        owner: &str,
+        ttl_seconds: u64,
+    ) -> Result<Self, String> {
         let path = path.as_ref().to_owned();
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && let Some(created) = text
+                .split("\"created\":")
+                .nth(1)
+                .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+                .and_then(|s| s.parse::<u64>().ok())
+        {
+            let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+            if now.saturating_sub(created) > ttl_seconds {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -19,7 +43,16 @@ impl Reservation {
                 )
             })?;
         use std::io::Write;
-        writeln!(file, "{owner}").map_err(|e| format!("reservation {}: {e}", path.display()))?;
+        let created = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        writeln!(
+            file,
+            "{{\"owner\":{},\"created\":{created}}}",
+            serde_json::to_string(owner).unwrap_or_else(|_| "\"unknown\"".into())
+        )
+        .map_err(|e| format!("reservation {}: {e}", path.display()))?;
         Ok(Self { path })
     }
 }
@@ -41,5 +74,12 @@ mod tests {
         drop(first);
         assert!(Reservation::acquire(&path, "two").is_ok());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn stale_reservations_can_be_reclaimed() {
+        let path = std::env::temp_dir().join(format!("sextant-stale-{}", std::process::id()));
+        std::fs::write(&path, r#"{"owner":"old","created":1}"#).unwrap();
+        let _owner = Reservation::acquire_with_ttl(&path, "new", 1).unwrap();
     }
 }

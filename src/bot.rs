@@ -196,11 +196,11 @@ impl Bot {
     }
 
     /// Craft one of the small player-inventory recipes using Horizon's menu slot controls.
-    /// Returns the number of output items produced.
+    /// The menu is always closed, including when a click or material check fails.
     pub fn craft(&mut self, recipe: &str, times: u32) -> Result<u32, String> {
-        let (inputs, output, amount) = match recipe.strip_prefix("minecraft:").unwrap_or(recipe) {
-            "planks" => (vec![("log", 1, 100)], "planks", 4),
-            "sticks" => (vec![("planks", 2, 100), ("planks", 2, 102)], "sticks", 4),
+        let (inputs, amount) = match recipe.strip_prefix("minecraft:").unwrap_or(recipe) {
+            "planks" => (vec![("log", 1, 100)], 4),
+            "sticks" => (vec![("planks", 2, 100), ("planks", 2, 102)], 4),
             "crafting_table" => (
                 vec![
                     ("planks", 1, 100),
@@ -208,43 +208,59 @@ impl Bot {
                     ("planks", 1, 102),
                     ("planks", 1, 103),
                 ],
-                "crafting_table",
                 1,
             ),
-            "torch" | "torches" => (vec![("coal", 1, 100), ("stick", 1, 102)], "torch", 4),
+            "torch" | "torches" => (vec![("coal", 1, 100), ("stick", 1, 102)], 4),
             other => {
                 return Err(format!(
                     "unsupported recipe {other}; supported: planks, sticks, crafting_table, torches"
                 ));
             }
         };
-        let mut made = 0;
-        for _ in 0..times {
-            let inv = self.inventory()?;
-            let mut used = Vec::new();
-            for (item, _, _) in &inputs {
-                let want = format!("minecraft:{item}");
-                let slot = inv["hotbar"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .chain(inv["main"].as_array().into_iter().flatten())
-                    .find(|s| s["item"].as_str() == Some(&want))
-                    .and_then(|s| s["slot"].as_u64())
-                    .ok_or_else(|| format!("need {item} to craft {recipe}"))?;
-                used.push(slot);
+        let result = (|| {
+            let mut made = 0;
+            for _ in 0..times {
+                let before = self.inventory()?;
+                let mut used = Vec::new();
+                for (item, needed, _) in &inputs {
+                    let count = before["counts"][format!("minecraft:{item}")]
+                        .as_i64()
+                        .unwrap_or(0);
+                    if count < *needed {
+                        return Err(format!(
+                            "need {needed} {item} to craft {recipe}, have {count}"
+                        ));
+                    }
+                    let want = format!("minecraft:{item}");
+                    let slot = before["hotbar"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .chain(before["main"].as_array().into_iter().flatten())
+                        .find(|s| s["item"].as_str() == Some(&want))
+                        .and_then(|s| s["slot"].as_u64())
+                        .ok_or_else(|| format!("need {item} in a usable inventory slot"))?;
+                    used.push(slot);
+                }
+                self.cmd("open-inventory")?;
+                for (slot, (_, _, grid)) in used.into_iter().zip(&inputs) {
+                    self.cmd(&format!("click-slot {slot}"))?;
+                    self.cmd(&format!("click-slot {grid}"))?;
+                }
+                self.cmd("click-slot 200")?;
+                let after = self.inventory()?;
+                if before["counts"] == after["counts"] {
+                    return Err(format!("crafting {recipe} produced no inventory change"));
+                }
+                made += amount;
             }
-            self.cmd("open-inventory")?;
-            for (slot, (_, _, grid)) in used.into_iter().zip(&inputs) {
-                self.cmd(&format!("click-slot {slot}"))?;
-                self.cmd(&format!("click-slot {grid}"))?;
-            }
-            self.cmd("click-slot 200")?;
-            self.cmd("close")?;
-            made += amount;
+            Ok(made)
+        })();
+        match (result, self.cmd("close")) {
+            (Ok(value), Ok(_)) => Ok(value),
+            (Err(error), _) => Err(error),
+            (_, Err(error)) => Err(error),
         }
-        let _ = output;
-        Ok(made)
     }
 
     /// Returns nearby entities, optionally filtered by a namespaced kind such as
