@@ -83,6 +83,10 @@ enum Cmd {
     Status,
     /// Print movement and travel capabilities reported by Horizon
     Capabilities,
+    /// Mount or dismount a vehicle
+    Mount(MountArgs),
+    /// Launch, boost, or inspect Elytra flight
+    Elytra(ElytraArgs),
     /// Craft a supported player-inventory recipe
     Craft(CraftArgs),
     /// Mine matching blocks in nearest-first order
@@ -146,6 +150,20 @@ struct CraftArgs {
     recipe: String,
     #[arg(long, short, default_value_t = 1)]
     times: u32,
+}
+
+#[derive(clap::Args)]
+struct MountArgs {
+    /// Entity id from `entities`
+    id: Option<i32>,
+    #[arg(long)]
+    dismount: bool,
+}
+
+#[derive(clap::Args)]
+struct ElytraArgs {
+    #[arg(value_parser = ["launch", "boost", "status"])]
+    action: String,
 }
 
 #[derive(clap::Args)]
@@ -349,6 +367,29 @@ fn run(cli: Cli) -> Result<(), String> {
                 serde_json::to_string_pretty(&bot.travel_capabilities()?)
                     .map_err(|e| e.to_string())?
             );
+            Ok(())
+        }
+        Cmd::Mount(MountArgs { id, dismount }) => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            if dismount {
+                println!("{}", bot.dismount()?);
+            } else {
+                let id = id.ok_or("mount needs ENTITY_ID or --dismount")?;
+                println!("{}", bot.mount(id)?);
+            }
+            Ok(())
+        }
+        Cmd::Elytra(ElytraArgs { action }) => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            println!("{}", bot.elytra(&action)?);
             Ok(())
         }
         Cmd::Craft(CraftArgs { recipe, times }) => {

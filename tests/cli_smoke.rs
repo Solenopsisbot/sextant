@@ -28,6 +28,8 @@ fn help_lists_every_top_level_operation() {
         "eta",
         "status",
         "capabilities",
+        "mount",
+        "elytra",
         "craft",
         "mine",
         "waypoint",

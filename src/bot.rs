@@ -105,17 +105,35 @@ impl Bot {
     pub fn travel_capabilities(&mut self) -> Result<TravelCapabilities, String> {
         let state = self.cmd("state")?;
         let dimension = state["dimension"].as_str().unwrap_or("unknown").to_owned();
-        let player = &state["player"];
         Ok(TravelCapabilities {
             dimension,
             // `move ... --jump` is enough to swim in water; the planner already assigns water
             // a higher cost. Portals remain usable through the ordinary interact command.
             swimming: true,
             portals: true,
-            // No mount/dismount or flight steering command exists in the current socket API.
-            vehicles: false,
-            elytra: player["fall_flying"].as_bool().unwrap_or(false),
+            vehicles: true,
+            elytra: true,
         })
+    }
+
+    pub fn mount(&mut self, entity: i32) -> Result<Value, String> {
+        self.batch(&[
+            format!("look-at entity {entity}"),
+            "mouse right click".into(),
+            "wait 2".into(),
+        ])
+        .map(|mut replies| replies.pop().unwrap_or(Value::Null))
+    }
+
+    pub fn dismount(&mut self) -> Result<Value, String> {
+        self.cmd("dismount")
+    }
+
+    pub fn elytra(&mut self, action: &str) -> Result<Value, String> {
+        match action {
+            "launch" | "boost" | "status" => self.cmd(&format!("elytra {action}")),
+            _ => Err("Elytra action must be launch, boost, or status".into()),
+        }
     }
 
     /// Snapshot the inventory, including hotbar, main inventory, held stack and counts.
