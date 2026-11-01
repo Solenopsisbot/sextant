@@ -38,6 +38,10 @@ pub struct Settings {
     pub break_speed: f32,
     /// Nodes looked at before the search gives up and returns the best partial path.
     pub node_budget: usize,
+    /// Hostile entity feet positions to avoid while choosing a route.
+    pub avoid: Vec<Pos>,
+    /// Extra movement ticks near an avoided entity.
+    pub avoid_penalty: f32,
 }
 
 impl Default for Settings {
@@ -49,6 +53,8 @@ impl Default for Settings {
             max_fall: 3,
             break_speed: 4.0,
             node_budget: 200_000,
+            avoid: Vec::new(),
+            avoid_penalty: 80.0,
         }
     }
 }
@@ -172,6 +178,23 @@ impl Mover<'_> {
         if self.s.sprint { SPRINT } else { WALK }
     }
 
+    fn avoidance(&self, p: Pos) -> f32 {
+        self.s
+            .avoid
+            .iter()
+            .map(|q| {
+                let dx = (p[0] - q[0]) as f32;
+                let dz = (p[2] - q[2]) as f32;
+                let d2 = dx * dx + dz * dz;
+                if d2 < 36.0 {
+                    self.s.avoid_penalty * (1.0 - d2.sqrt() / 6.0).max(0.0)
+                } else {
+                    0.0
+                }
+            })
+            .sum()
+    }
+
     /// Every step from feet `p`, with its cost. `placed_floor`: the step that led here placed
     /// the block under `p` (a pillar or a bridge), which the world doesn't know about yet.
     fn steps(&self, p: Pos, placed_floor: bool, out: &mut Vec<(Step, f32)>) {
@@ -191,7 +214,7 @@ impl Mover<'_> {
                             mine,
                             place: None,
                         },
-                        flat * water(next) + c,
+                        flat * water(next) + c + self.avoidance(next),
                     ));
                 } else if self.s.allow_place
                     && self.at(add(next, [0, -1, 0])).passable()
@@ -248,7 +271,7 @@ impl Mover<'_> {
                         mine,
                         place: None,
                     },
-                    flat + JUMP + c1 + c2,
+                    flat + JUMP + c1 + c2 + self.avoidance(up),
                 ));
             }
             // Walk off and fall onto the first floor below.
@@ -278,7 +301,7 @@ impl Mover<'_> {
                                     mine: Vec::new(),
                                     place: None,
                                 },
-                                flat + fall_ticks(n) + c,
+                                flat + fall_ticks(n) + c + self.avoidance(land),
                             ));
                         }
                         break;
@@ -303,7 +326,7 @@ impl Mover<'_> {
                         mine: Vec::new(),
                         place: None,
                     },
-                    flat * std::f32::consts::SQRT_2 * water(next),
+                    flat * std::f32::consts::SQRT_2 * water(next) + self.avoidance(next),
                 ));
             }
         }
@@ -749,5 +772,23 @@ mod tests {
     fn falling_takes_vanilla_ticks() {
         assert_eq!(fall_ticks(1), 5.0);
         assert!(fall_ticks(3) > fall_ticks(1));
+    }
+
+    #[test]
+    fn hostile_positions_add_a_cost_to_nearby_routes() {
+        let w = world(&[]);
+        let guarded = plan(
+            &w,
+            [0, 0, 0],
+            Goal {
+                pos: [4, 0, 0],
+                radius: 0.0,
+            },
+            &Settings {
+                avoid: vec![[2, 0, 0]],
+                ..Settings::default()
+            },
+        );
+        assert!(guarded.cost.is_finite());
     }
 }

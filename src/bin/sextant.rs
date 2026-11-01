@@ -45,6 +45,9 @@ struct Cli {
     /// Waypoint file for save/list/go commands
     #[arg(long, global = true, default_value = ".sextant-waypoints.toml")]
     waypoints: PathBuf,
+    /// Task file used by pause/resume
+    #[arg(long, global = true, default_value = ".sextant-task.toml")]
+    task: PathBuf,
     /// Print every step, and where the bot was when one fails
     #[arg(long, short, global = true)]
     verbose: bool,
@@ -73,6 +76,8 @@ enum Cmd {
     Eta(Target),
     /// Print the bot's current control state
     Status,
+    /// Print movement and travel capabilities reported by Horizon
+    Capabilities,
     /// Mine matching blocks in nearest-first order
     Mine(MineArgs),
     /// Save, list, or navigate to named coordinates
@@ -210,6 +215,11 @@ struct Target {
     z: i32,
 }
 
+#[derive(Serialize, Deserialize)]
+struct TaskRecord {
+    target: [i32; 3],
+}
+
 fn main() {
     if let Err(e) = run(Cli::parse()) {
         eprintln!("sextant: {e}");
@@ -247,7 +257,7 @@ fn run(cli: Cli) -> Result<(), String> {
             }
             Ok(())
         }
-        command @ (Cmd::Stop | Cmd::Pause | Cmd::Resume) => {
+        command @ (Cmd::Stop | Cmd::Pause) => {
             let mut bot = Bot::connect(
                 cli.socket
                     .as_deref()
@@ -257,9 +267,40 @@ fn run(cli: Cli) -> Result<(), String> {
             match command {
                 Cmd::Stop => println!("stopped"),
                 Cmd::Pause => println!("paused (keys released; rerun the command to resume)"),
-                Cmd::Resume => println!("no resumable process; start a new go command"),
                 _ => unreachable!(),
             }
+            Ok(())
+        }
+        Cmd::Resume => {
+            let record: TaskRecord = toml::from_str(
+                &fs::read_to_string(&cli.task)
+                    .map_err(|e| format!("{}: {e}", cli.task.display()))?,
+            )
+            .map_err(|e| format!("{}: {e}", cli.task.display()))?;
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            let trip = bot::Trip {
+                settings: settings.clone(),
+                style: &style,
+                seed: cli.seed,
+                verbose: cli.verbose,
+                block: cli.block.clone(),
+                tool: cli.tool.clone(),
+            };
+            bot::go(
+                &mut bot,
+                Goal {
+                    pos: record.target,
+                    radius: cli.radius,
+                },
+                &trip,
+                |line| eprintln!("{line}"),
+            )?;
+            let _ = fs::remove_file(&cli.task);
+            println!("resumed to {:?}", record.target);
             Ok(())
         }
         Cmd::Status => {
@@ -269,6 +310,19 @@ fn run(cli: Cli) -> Result<(), String> {
                     .ok_or("--socket: which bot (its control socket)")?,
             )?;
             println!("{}", bot.cmd("state")?);
+            Ok(())
+        }
+        Cmd::Capabilities => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&bot.travel_capabilities()?)
+                    .map_err(|e| e.to_string())?
+            );
             Ok(())
         }
         Cmd::Eta(Target { x, y, z }) => {
@@ -660,6 +714,11 @@ fn run(cli: Cli) -> Result<(), String> {
                 radius: cli.radius,
             };
             let started = std::time::Instant::now();
+            fs::write(
+                &cli.task,
+                toml::to_string(&TaskRecord { target: [x, y, z] }).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| format!("{}: {e}", cli.task.display()))?;
             let trip = bot::Trip {
                 settings: settings.clone(),
                 style: &style,
@@ -676,6 +735,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 started.elapsed().as_secs_f32(),
                 style.name
             );
+            let _ = fs::remove_file(&cli.task);
             Ok(())
         }
     }

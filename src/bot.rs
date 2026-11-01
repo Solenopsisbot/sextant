@@ -9,6 +9,7 @@ use crate::build::Blueprint;
 use crate::planner::{self, Goal, Kind, Path, Settings, Step};
 use crate::style::{Rng, Style};
 use crate::world::{Pos, Region, cube_of};
+use serde::Serialize;
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -51,7 +52,7 @@ pub struct Entity {
 /// Capabilities exposed by the current Horizon control socket.  The socket can drive ordinary
 /// movement and item use, but mounting vehicles, changing dimensions, and flight control need
 /// dedicated Horizon commands and are reported explicitly instead of being faked.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TravelCapabilities {
     pub dimension: String,
     pub swimming: bool,
@@ -1045,7 +1046,7 @@ fn mature_crop(state: &str) -> bool {
     let name = state.split('[').next().unwrap_or(state);
     let age = state
         .split_once("age=")
-        .and_then(|(_, rest)| rest.split(|c| c == ',' || c == ']').next())
+        .and_then(|(_, rest)| rest.split([',', ']']).next())
         .and_then(|v| v.parse::<u8>().ok());
     age == Some(7) || (name.ends_with("beetroots") && age == Some(3))
 }
