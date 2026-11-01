@@ -323,6 +323,7 @@ fn world(config: &FleetConfig, path: &str) -> String {
                 && let Some(object) = blocks.as_object_mut()
             {
                 object.insert("entities".into(), entities["entities"].clone());
+                object.insert("effects".into(), s["player"]["effects"].clone());
             }
             Ok(blocks)
         })
@@ -502,7 +503,8 @@ function pos(v){return v?.player?.position||[0,0,0]}
 function project(p,layer){let dx=p[0]-(lastWorld?.from?.[0]||0),dy=p[1]-layer,dz=p[2]-(lastWorld?.from?.[2]||0),a=cam.yaw*Math.PI/180,q=cam.pitch*Math.PI/180,x=dx*Math.cos(a)-dz*Math.sin(a),depth=dx*Math.sin(a)+dz*Math.cos(a);return [x*cam.zoom,(dy*Math.cos(q)-depth*Math.sin(q))*cam.zoom]}
 function draw(){let c=$('map'),g=c.getContext('2d');g.clearRect(0,0,c.width,c.height);g.save();g.translate(c.width/2,c.height/2+80);let scale=cam.zoom;let layer=Number($('layer').value)||64;for(const b of (lastWorld?.blocks||[])){if(b[1]!==layer)continue;let [sx,sy]=project([b[0],b[1],b[2]],layer);let img=texture(b[3]);g.beginPath();g.moveTo(sx,sy);g.lineTo(sx+scale*.5,sy+scale*.25);g.lineTo(sx,sy+scale*.5);g.lineTo(sx-scale*.5,sy+scale*.25);g.closePath();if(img&&img.complete&&img.naturalWidth){g.save();g.clip();g.drawImage(img,sx-scale*.5,sy,scale,scale*.5);g.restore()}else{g.fillStyle=color(b[3]);g.fill();}}
 for(const [name,v] of Object.entries(lastState?.bots||{})){let p=pos(v),[sx,sy]=project(p,layer);g.fillStyle='#7fda9b';g.beginPath();g.arc(sx,sy,7,0,7);g.fill();g.fillStyle='#fff';g.fillText(name,sx+9,sy)}
-for(const e of (lastWorld?.entities||[])){let p=e.pos||[0,0,0];if(Math.abs(p[1]-layer)>8)continue;let [sx,sy]=project(p,layer);g.fillStyle='#f06b9a';g.beginPath();g.moveTo(sx,sy-6);g.lineTo(sx+5,sy+5);g.lineTo(sx-5,sy+5);g.closePath();g.fill();}g.restore();}
+for(const e of (lastWorld?.entities||[])){let p=e.pos||[0,0,0];if(Math.abs(p[1]-layer)>8)continue;let [sx,sy]=project(p,layer);if(e.type==='minecraft:item'){g.fillStyle=color(e.item?.item||'item');g.fillRect(sx-4,sy-4,8,8)}else if(e.type==='minecraft:experience_orb'){g.fillStyle='#70e35e';g.beginPath();g.arc(sx,sy,4,0,7);g.fill()}else{g.fillStyle='#f06b9a';g.beginPath();g.moveTo(sx,sy-6);g.lineTo(sx+5,sy+5);g.lineTo(sx-5,sy+5);g.closePath();g.fill();}}
+for(const [index,effect] of (lastWorld?.effects||[]).entries()){for(let n=0;n<4;n++){let a=(index*4+n)*1.7,px=Math.cos(a)*10,py=Math.sin(a)*6;g.fillStyle='#b57cff';g.fillRect(px,py,2,2)}}g.restore();}
 function drawBots(d){lastState=d;let a=Object.entries(d.bots||{});$('bots').innerHTML=a.map(([n,v])=>`<div class="bot ${selected===n?'selected':''}" onclick="selectBot('${n}')"><b>${n}</b> <span class="ok">${v.player?'online':'offline'}</span><br><span class="muted">${JSON.stringify(pos(v))}</span></div>`).join('');$('jobs').innerHTML=(d.jobs||[]).map(j=>`<div class="muted">${j.id}: ${j.status}${j.worker?' · '+j.worker:''}</div>`).join('');if(selected&&d.bots[selected]?.player){$('layer').value=Math.floor(pos(d.bots[selected])[1])}draw()}
 function selectBot(n){selected=n;$('selected').textContent=n;drawBots(lastState||{bots:{}});refreshWorld();if(ws&&ws.readyState===1)ws.send(JSON.stringify({subscribe:n,interval_ms:500}))}
 function poll(){api('/api/state').then(r=>r.json()).then(d=>{drawBots(d);$('conn').textContent='live'}).catch(()=>$('conn').textContent='offline')}

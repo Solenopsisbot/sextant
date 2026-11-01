@@ -164,6 +164,9 @@ frames. A token file is reread for every HTTP/WebSocket handshake, so rotation i
 
 Drag the canvas to orbit, use the wheel to zoom, and change the Y layer to inspect vertical slices.
 Entity snapshots from Horizon are drawn as live markers and are refreshed with the loaded block view.
+Dropped item stacks render as item squares, experience orbs as glowing markers, mobs as entity
+triangles, and active player effects produce lightweight particle specks around the player. These
+effects are presentation data; Horizon remains authoritative for positions and inventory state.
 
 ## Styles
 
