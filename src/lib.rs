@@ -2,6 +2,7 @@ pub mod bot;
 pub mod build;
 pub mod coordination;
 pub mod dashboard;
+pub mod pack;
 pub mod planner;
 pub mod spectator;
 pub mod style;

@@ -107,6 +107,8 @@ fn handle(stream: &mut TcpStream, config: &FleetConfig) -> Result<(), String> {
             state(config)
         } else if path.starts_with("/api/world") {
             world(config, path)
+        } else if path.starts_with("/api/model") {
+            model(config, path)
         } else if method == "POST" && path == "/api/command" {
             command(config, request.split("\r\n\r\n").nth(1).unwrap_or(""))
         } else {
@@ -227,7 +229,7 @@ fn snapshots(config: &FleetConfig) -> Value {
     Value::Object(map)
 }
 fn state(config: &FleetConfig) -> String {
-    json!({"bots": snapshots(config), "jobs": jobs(config), "capabilities": ["state", "command", "world", "websocket", "jobs"]})
+    json!({"bots": snapshots(config), "jobs": jobs(config), "capabilities": ["state", "command", "world", "model", "websocket", "jobs"]})
         .to_string()
 }
 fn jobs(config: &FleetConfig) -> Value {
@@ -274,6 +276,21 @@ fn world(config: &FleetConfig, path: &str) -> String {
         })
         .unwrap_or_else(|e| json!({"error":e}));
     value.to_string()
+}
+fn model(config: &FleetConfig, path: &str) -> String {
+    let name = path
+        .split("name=")
+        .nth(1)
+        .and_then(|s| s.split('&').next())
+        .unwrap_or("");
+    let Some(root) = config.textures.as_ref() else {
+        return json!({"error":"textures are not configured"}).to_string();
+    };
+    match crate::pack::Library::new(root).load(name) {
+        Ok(model) => serde_json::to_string(&model)
+            .unwrap_or_else(|e| json!({"error":e.to_string()}).to_string()),
+        Err(error) => json!({"error": error}).to_string(),
+    }
 }
 fn command(config: &FleetConfig, body: &str) -> String {
     let req: Value = serde_json::from_str(body).unwrap_or_default();
