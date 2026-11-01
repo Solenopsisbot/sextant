@@ -65,6 +65,8 @@ struct Cli {
 enum Cmd {
     /// Walk to X Y Z (feet), replanning as it goes
     Go(Target),
+    /// Walk into a portal at X Y Z and wait for the dimension change
+    Portal(PortalArgs),
     /// Plan the route to X Y Z from where the bot stands, without moving
     Plan(Target),
     /// Print the presets
@@ -225,6 +227,18 @@ struct Target {
     y: i32,
     #[arg(allow_negative_numbers = true)]
     z: i32,
+}
+
+#[derive(clap::Args)]
+struct PortalArgs {
+    #[arg(allow_negative_numbers = true)]
+    x: i32,
+    #[arg(allow_negative_numbers = true)]
+    y: i32,
+    #[arg(allow_negative_numbers = true)]
+    z: i32,
+    #[arg(long, default_value_t = 200)]
+    timeout_ticks: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -767,6 +781,37 @@ fn run(cli: Cli) -> Result<(), String> {
                 style.name
             );
             let _ = fs::remove_file(&cli.task);
+            Ok(())
+        }
+        Cmd::Portal(PortalArgs {
+            x,
+            y,
+            z,
+            timeout_ticks,
+        }) => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            let trip = bot::Trip {
+                settings: settings.clone(),
+                style: &style,
+                seed: cli.seed,
+                verbose: cli.verbose,
+                block: cli.block.clone(),
+                tool: cli.tool.clone(),
+            };
+            let dimension = bot::portal(
+                &mut bot,
+                Goal {
+                    pos: [x, y, z],
+                    radius: cli.radius,
+                },
+                &trip,
+                timeout_ticks,
+            )?;
+            println!("entered {dimension}");
             Ok(())
         }
     }

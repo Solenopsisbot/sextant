@@ -1068,6 +1068,31 @@ pub fn go(bot: &mut Bot, goal: Goal, trip: &Trip, log: impl FnMut(&str)) -> Resu
     result.and(released.map(|_| ()))
 }
 
+/// Walk into a portal at the target and wait for Horizon to report a dimension change.
+pub fn portal(
+    bot: &mut Bot,
+    target: Goal,
+    trip: &Trip,
+    timeout_ticks: u32,
+) -> Result<String, String> {
+    let before = bot.cmd("state")?["dimension"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_owned();
+    go(bot, target, trip, |_| {})?;
+    for _ in 0..timeout_ticks {
+        let state = bot.cmd("state")?;
+        let dimension = state["dimension"].as_str().unwrap_or("unknown");
+        if dimension != before {
+            return Ok(dimension.to_owned());
+        }
+        let _ = bot.cmd("wait 1")?;
+    }
+    Err(format!(
+        "portal did not change dimension from {before} within {timeout_ticks} ticks"
+    ))
+}
+
 /// Mine the nearest loaded matching blocks, one at a time. The target itself is not used as a
 /// walking destination: a player must stand beside a solid block to break it, so we path to its
 /// neighbourhood and then let Horizon's normal break action handle reach, timing and drops.
