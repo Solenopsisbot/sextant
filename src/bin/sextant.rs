@@ -9,6 +9,7 @@
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use sextant::bot::{self, Bot};
+use sextant::build::Blueprint;
 use sextant::planner::{Goal, Settings};
 use sextant::style::Style;
 use std::path::PathBuf;
@@ -76,6 +77,10 @@ enum Cmd {
     Mine(MineArgs),
     /// Save, list, or navigate to named coordinates
     Waypoint(WaypointArgs),
+    /// Build a JSON blueprint, placing supports before upper blocks
+    Build(BuildArgs),
+    /// Follow the nearest matching entity for a bounded number of updates
+    Follow(FollowArgs),
 }
 
 #[derive(clap::Args)]
@@ -108,6 +113,27 @@ struct MineArgs {
     /// Search radius for loaded matching blocks
     #[arg(long, default_value_t = 64)]
     search_radius: i32,
+}
+
+#[derive(clap::Args)]
+struct BuildArgs {
+    /// Blueprint JSON file
+    file: PathBuf,
+    /// Optional world-space origin X Y Z; defaults to the bot's feet
+    #[arg(long, num_args = 3, value_names = ["X", "Y", "Z"])]
+    origin: Option<Vec<i32>>,
+}
+
+#[derive(clap::Args)]
+struct FollowArgs {
+    /// Entity kind, for example player, minecraft:pig, or item
+    kind: String,
+    #[arg(long, default_value_t = 32.0)]
+    search_radius: f64,
+    #[arg(long, default_value_t = 2.0)]
+    stop_distance: f32,
+    #[arg(long, default_value_t = 20)]
+    rounds: u32,
 }
 
 /// A block position; coordinates may be negative (`go -- -120 64 -40` isn't needed).
@@ -229,6 +255,58 @@ fn run(cli: Cli) -> Result<(), String> {
                 eprintln!("{line}")
             })?;
             println!("mined {mined} block(s)");
+            Ok(())
+        }
+        Cmd::Build(BuildArgs { file, origin }) => {
+            let blueprint = Blueprint::load(&file)?;
+            let origin = origin.map(|v| [v[0], v[1], v[2]]);
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            let trip = bot::Trip {
+                settings: settings.clone(),
+                style: &style,
+                seed: cli.seed,
+                verbose: cli.verbose,
+                block: cli.block.clone(),
+                tool: cli.tool.clone(),
+            };
+            let placed = bot::build(&mut bot, &blueprint, origin, &trip, |line| {
+                eprintln!("{line}")
+            })?;
+            println!("placed {placed} block(s)");
+            Ok(())
+        }
+        Cmd::Follow(FollowArgs {
+            kind,
+            search_radius,
+            stop_distance,
+            rounds,
+        }) => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            let trip = bot::Trip {
+                settings: settings.clone(),
+                style: &style,
+                seed: cli.seed,
+                verbose: cli.verbose,
+                block: cli.block.clone(),
+                tool: cli.tool.clone(),
+            };
+            bot::follow(
+                &mut bot,
+                &kind,
+                search_radius,
+                stop_distance,
+                rounds,
+                &trip,
+                |line| eprintln!("{line}"),
+            )?;
             Ok(())
         }
         Cmd::Waypoint(WaypointArgs { action }) => {

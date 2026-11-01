@@ -5,6 +5,7 @@
 //! round trip is about a frame; lines written together are answered in one frame, so a control
 //! update (read the state, turn, press keys) is sent as one batch.
 
+use crate::build::Blueprint;
 use crate::planner::{self, Goal, Kind, Path, Settings, Step};
 use crate::style::{Rng, Style};
 use crate::world::{Pos, Region, cube_of};
@@ -36,6 +37,15 @@ pub struct Me {
     pub velocity: [f64; 3],
     /// Dead (its death screen is open): nothing it is told to do happens.
     pub dead: bool,
+}
+
+/// A nearby entity reported by Horizon's control socket.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entity {
+    pub id: Option<i32>,
+    pub kind: String,
+    pub pos: [f64; 3],
+    pub distance: f64,
 }
 
 impl Bot {
@@ -77,6 +87,34 @@ impl Bot {
 
     pub fn me(&mut self) -> Result<Me, String> {
         parse_me(&self.cmd("state")?)
+    }
+
+    /// Returns nearby entities, optionally filtered by a namespaced kind such as
+    /// `minecraft:pig` or `minecraft:item`.
+    pub fn entities(&mut self, radius: f64, kind: Option<&str>) -> Result<Vec<Entity>, String> {
+        let command = match kind {
+            Some(kind) => format!("entities {radius} {kind}"),
+            None => format!("entities {radius}"),
+        };
+        let value = self.cmd(&command)?;
+        value["entities"]
+            .as_array()
+            .ok_or("entities reply without entities list")?
+            .iter()
+            .map(|v| {
+                let p = v["pos"].as_array().ok_or("entity without position")?;
+                Ok(Entity {
+                    id: v["id"].as_i64().map(|n| n as i32),
+                    kind: v["type"].as_str().unwrap_or("unknown").to_owned(),
+                    pos: [
+                        p.first().and_then(Value::as_f64).ok_or("bad entity x")?,
+                        p.get(1).and_then(Value::as_f64).ok_or("bad entity y")?,
+                        p.get(2).and_then(Value::as_f64).ok_or("bad entity z")?,
+                    ],
+                    distance: v["distance"].as_f64().unwrap_or(f64::INFINITY),
+                })
+            })
+            .collect()
     }
 
     /// Finds loaded blocks of a kind, nearest first. Horizon does the scan in its world
@@ -892,6 +930,121 @@ pub fn mine(
     }
 }
 
+/// Follow the nearest matching entity, replanning toward its current position each round.
+/// The entity query is intentionally repeated so moving mobs and dropped items are followed
+/// without pretending the first observation is still valid.
+pub fn follow(
+    bot: &mut Bot,
+    kind: &str,
+    radius: f64,
+    stop_distance: f32,
+    rounds: u32,
+    trip: &Trip,
+    mut log: impl FnMut(&str),
+) -> Result<(), String> {
+    if rounds == 0 {
+        return Err("follow needs at least one round".into());
+    }
+    let result = (|| {
+        for round in 0..rounds {
+            let mut entities = bot.entities(radius, Some(kind))?;
+            entities.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+            let Some(target) = entities.first() else {
+                return Err(format!("no {kind} within {radius} blocks"));
+            };
+            let goal = Goal {
+                pos: [
+                    target.pos[0].floor() as i32,
+                    target.pos[1].floor() as i32,
+                    target.pos[2].floor() as i32,
+                ],
+                radius: stop_distance,
+            };
+            log(&format!("follow round {round}: {kind} at {:?}", goal.pos));
+            go(bot, goal, trip, |line| log(line))?;
+        }
+        Ok(())
+    })();
+    bot.cmd("release").map(|_| ())?;
+    result
+}
+
+/// Walk an outward square spiral, useful for surveying terrain when there is no fixed goal.
+/// Each leg is a normal Sextant trip, so hazards and unloaded terrain still use the planner.
+pub fn explore(
+    bot: &mut Bot,
+    legs: u32,
+    leg_length: i32,
+    trip: &Trip,
+    mut log: impl FnMut(&str),
+) -> Result<(), String> {
+    if legs == 0 || leg_length <= 0 {
+        return Err("explore needs positive legs and leg length".into());
+    }
+    let result = (|| {
+        let mut origin = bot.me()?.feet;
+        let mut distance = leg_length;
+        let dirs = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+        for leg in 0..legs {
+            let [dx, dz] = dirs[(leg / 2 % 4) as usize];
+            origin[0] += dx * distance;
+            origin[2] += dz * distance;
+            log(&format!("explore leg {leg}: heading to {:?}", origin));
+            go(
+                bot,
+                Goal {
+                    pos: origin,
+                    radius: 0.0,
+                },
+                trip,
+                |line| log(line),
+            )?;
+            if leg % 2 == 1 {
+                distance = distance.saturating_add(leg_length);
+            }
+        }
+        Ok(())
+    })();
+    bot.cmd("release").map(|_| ())?;
+    result
+}
+
+/// Build a validated blueprint from the bot's current position (or `origin`), placing
+/// supports first. Horizon performs the actual reach, inventory, and placement validation.
+pub fn build(
+    bot: &mut Bot,
+    blueprint: &Blueprint,
+    origin: Option<Pos>,
+    trip: &Trip,
+    mut log: impl FnMut(&str),
+) -> Result<u32, String> {
+    let origin = match origin {
+        Some(origin) => origin,
+        None => bot.me()?.feet,
+    };
+    let mut placed = 0;
+    let result = (|| {
+        for action in blueprint.actions(origin) {
+            let crate::build::BuildAction::Place { pos, block } = action;
+            let current = bot.cmd(&format!("block {} {} {}", pos[0], pos[1], pos[2]))?;
+            if current["state"]
+                .as_str()
+                .is_some_and(|s| s.ends_with(":air"))
+            {
+                log(&format!("building {block} at {pos:?}"));
+                go(bot, Goal { pos, radius: 1.5 }, trip, |line| log(line))?;
+                bot.cmd(&format!(
+                    "place {} {} {} --item {}",
+                    pos[0], pos[1], pos[2], block
+                ))?;
+                placed += 1;
+            }
+        }
+        Ok(placed)
+    })();
+    bot.cmd("release").map(|_| ()).and(result)
+}
+
 fn go_inner(
     bot: &mut Bot,
     goal: Goal,
@@ -1023,5 +1176,15 @@ mod tests {
             vec![[1, 12, -4], [-2, 10, 9]]
         );
         assert!(parse_find_blocks(&serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn entity_reply_shape_is_stable() {
+        let value = serde_json::json!({
+            "entities": [{"id": 7, "type": "minecraft:pig", "pos": [1.0, 64.0, -2.0], "distance": 3.5}]
+        });
+        let entity = value["entities"].as_array().unwrap().first().unwrap();
+        assert_eq!(entity["type"], "minecraft:pig");
+        assert_eq!(entity["pos"][0], 1.0);
     }
 }
