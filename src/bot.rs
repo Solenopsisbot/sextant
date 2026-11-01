@@ -964,6 +964,73 @@ pub fn mine(
     }
 }
 
+fn crop_seed(block: &str) -> Option<&'static str> {
+    match block.strip_prefix("minecraft:").unwrap_or(block) {
+        "wheat" => Some("wheat_seeds"),
+        "carrots" => Some("carrot"),
+        "potatoes" => Some("potato"),
+        "beetroots" => Some("beetroot_seeds"),
+        _ => None,
+    }
+}
+
+fn mature_crop(state: &str) -> bool {
+    let name = state.split('[').next().unwrap_or(state);
+    let age = state
+        .split_once("age=")
+        .and_then(|(_, rest)| rest.split(|c| c == ',' || c == ']').next())
+        .and_then(|v| v.parse::<u8>().ok());
+    age == Some(7) || (name.ends_with("beetroots") && age == Some(3))
+}
+
+/// Harvest and replant mature crops near the bot for a bounded number of cycles.
+pub fn farm(
+    bot: &mut Bot,
+    crops: &[String],
+    radius: i32,
+    rounds: u32,
+    trip: &Trip,
+    mut log: impl FnMut(&str),
+) -> Result<u32, String> {
+    if crops.is_empty() {
+        return Err("farm needs at least one crop".into());
+    }
+    let mut harvested = 0;
+    for _ in 0..rounds {
+        let mut did = false;
+        for crop in crops {
+            let Some(seed) = crop_seed(crop) else {
+                return Err(format!("unsupported crop {crop}"));
+            };
+            for pos in bot.find_blocks(crop, radius)? {
+                let state = bot.cmd(&format!("block {} {} {}", pos[0], pos[1], pos[2]))?;
+                if !mature_crop(state["state"].as_str().unwrap_or("")) {
+                    continue;
+                }
+                log(&format!("harvesting {crop} at {pos:?}"));
+                go(bot, Goal { pos, radius: 1.5 }, trip, |line| log(line))?;
+                bot.cmd(&format!(
+                    "break {} {} {} --timeout 120",
+                    pos[0], pos[1], pos[2]
+                ))?;
+                if bot.item_count(seed)? > 0 {
+                    bot.cmd(&format!(
+                        "place {} {} {} --item {seed}",
+                        pos[0], pos[1], pos[2]
+                    ))?;
+                }
+                harvested += 1;
+                did = true;
+            }
+        }
+        if !did {
+            break;
+        }
+    }
+    bot.cmd("release").map(|_| ())?;
+    Ok(harvested)
+}
+
 /// Follow the nearest matching entity, replanning toward its current position each round.
 /// The entity query is intentionally repeated so moving mobs and dropped items are followed
 /// without pretending the first observation is still valid.
@@ -1210,6 +1277,14 @@ mod tests {
             vec![[1, 12, -4], [-2, 10, 9]]
         );
         assert!(parse_find_blocks(&serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn crops_are_mature_at_their_maximum_age() {
+        assert!(mature_crop("minecraft:wheat[age=7]"));
+        assert!(mature_crop("minecraft:beetroots[age=3]"));
+        assert!(!mature_crop("minecraft:wheat[age=6]"));
+        assert_eq!(crop_seed("minecraft:carrots"), Some("carrot"));
     }
 
     #[test]

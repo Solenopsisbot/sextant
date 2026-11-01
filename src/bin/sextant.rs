@@ -93,6 +93,8 @@ enum Cmd {
     Find(FindArgs),
     /// Walk away from a target by a distance
     Invert(InvertArgs),
+    /// Harvest and replant mature crops
+    Farm(FarmArgs),
 }
 
 #[derive(clap::Args)]
@@ -125,6 +127,17 @@ struct MineArgs {
     /// Search radius for loaded matching blocks
     #[arg(long, default_value_t = 64)]
     search_radius: i32,
+}
+
+#[derive(clap::Args)]
+struct FarmArgs {
+    /// Crop block names (wheat, carrots, potatoes, beetroots)
+    #[arg(required = true)]
+    crops: Vec<String>,
+    #[arg(long, default_value_t = 32)]
+    search_radius: i32,
+    #[arg(long, default_value_t = 1)]
+    rounds: u32,
 }
 
 #[derive(clap::Args)]
@@ -518,6 +531,30 @@ fn run(cli: Cli) -> Result<(), String> {
                 &trip,
                 |line| eprintln!("{line}"),
             )?;
+            Ok(())
+        }
+        Cmd::Farm(FarmArgs {
+            crops,
+            search_radius,
+            rounds,
+        }) => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            let trip = bot::Trip {
+                settings: settings.clone(),
+                style: &style,
+                seed: cli.seed,
+                verbose: cli.verbose,
+                block: cli.block.clone(),
+                tool: cli.tool.clone(),
+            };
+            let harvested = bot::farm(&mut bot, &crops, search_radius, rounds, &trip, |line| {
+                eprintln!("{line}")
+            })?;
+            println!("harvested {harvested} crop(s)");
             Ok(())
         }
         Cmd::Waypoint(WaypointArgs { action }) => {
