@@ -31,6 +31,15 @@ struct Cli {
     /// Arrive within this many blocks of the target
     #[arg(long, global = true, default_value_t = 0.0)]
     radius: f32,
+    /// The hotbar item placed for pillars and bridges
+    #[arg(long, global = true, default_value = "cobblestone")]
+    block: String,
+    /// The hotbar item to mine with (default: whatever it holds)
+    #[arg(long, global = true)]
+    tool: Option<String>,
+    /// Print every step, and where the bot was when one fails
+    #[arg(long, short, global = true)]
+    verbose: bool,
     /// The seed of the style's randomness
     #[arg(long, global = true, default_value_t = 1)]
     seed: u64,
@@ -140,9 +149,15 @@ fn run(cli: Cli) -> Result<(), String> {
                 radius: cli.radius,
             };
             let started = std::time::Instant::now();
-            bot::go(&mut bot, goal, &settings, &style, cli.seed, |line| {
-                eprintln!("{line}")
-            })?;
+            let trip = bot::Trip {
+                settings: settings.clone(),
+                style: &style,
+                seed: cli.seed,
+                verbose: cli.verbose,
+                block: cli.block.clone(),
+                tool: cli.tool.clone(),
+            };
+            bot::go(&mut bot, goal, &trip, |line| eprintln!("{line}"))?;
             let me = bot.me()?;
             println!(
                 "arrived at {:?} in {:.1} s ({} style)",
