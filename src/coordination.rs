@@ -25,9 +25,9 @@ impl Reservation {
                 .and_then(|s| s.parse::<u64>().ok())
         {
             let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             if now.saturating_sub(created) > ttl_seconds {
                 let _ = std::fs::remove_file(&path);
             }
