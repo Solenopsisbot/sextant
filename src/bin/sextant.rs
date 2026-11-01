@@ -48,6 +48,9 @@ struct Cli {
     /// Task file used by pause/resume
     #[arg(long, global = true, default_value = ".sextant-task.toml")]
     task: PathBuf,
+    /// Optional cross-process reservation file for fleet coordination
+    #[arg(long, global = true)]
+    reservation: Option<PathBuf>,
     /// Print every step, and where the bot was when one fails
     #[arg(long, short, global = true)]
     verbose: bool,
@@ -722,6 +725,16 @@ fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
         Cmd::Go(Target { x, y, z }) => {
+            let _reservation = cli
+                .reservation
+                .as_ref()
+                .map(|path| {
+                    sextant::coordination::Reservation::acquire(
+                        path,
+                        &format!("{}:{x}:{y}:{z}", std::process::id()),
+                    )
+                })
+                .transpose()?;
             let mut bot = Bot::connect(
                 cli.socket
                     .as_deref()
