@@ -48,6 +48,18 @@ pub struct Entity {
     pub distance: f64,
 }
 
+/// Capabilities exposed by the current Horizon control socket.  The socket can drive ordinary
+/// movement and item use, but mounting vehicles, changing dimensions, and flight control need
+/// dedicated Horizon commands and are reported explicitly instead of being faked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TravelCapabilities {
+    pub dimension: String,
+    pub swimming: bool,
+    pub portals: bool,
+    pub vehicles: bool,
+    pub elytra: bool,
+}
+
 impl Bot {
     pub fn connect(socket: &std::path::Path) -> Result<Self, String> {
         let out = UnixStream::connect(socket).map_err(|e| format!("{}: {e}", socket.display()))?;
@@ -89,6 +101,22 @@ impl Bot {
         parse_me(&self.cmd("state")?)
     }
 
+    pub fn travel_capabilities(&mut self) -> Result<TravelCapabilities, String> {
+        let state = self.cmd("state")?;
+        let dimension = state["dimension"].as_str().unwrap_or("unknown").to_owned();
+        let player = &state["player"];
+        Ok(TravelCapabilities {
+            dimension,
+            // `move ... --jump` is enough to swim in water; the planner already assigns water
+            // a higher cost. Portals remain usable through the ordinary interact command.
+            swimming: true,
+            portals: true,
+            // No mount/dismount or flight steering command exists in the current socket API.
+            vehicles: false,
+            elytra: player["fall_flying"].as_bool().unwrap_or(false),
+        })
+    }
+
     /// Snapshot the inventory, including hotbar, main inventory, held stack and counts.
     pub fn inventory(&mut self) -> Result<Value, String> {
         self.cmd("inventory")
@@ -117,6 +145,16 @@ impl Bot {
             return Err(format!("need at least {minimum} of {item}, have {count}"));
         }
         Ok(())
+    }
+
+    /// Verify that an item is available in a usable hotbar slot and select it. Horizon keeps
+    /// the main inventory separate from the hotbar, so silently proceeding here would make a
+    /// later break/place action fail after the bot has already walked to its target.
+    pub fn ensure_hotbar_item(&mut self, item: &str, minimum: i64) -> Result<(), String> {
+        self.require_item(item, minimum)?;
+        self.select_item(item).map(|_| ()).map_err(|e| {
+            format!("{item} is not usable from the hotbar; move it into a hotbar slot first ({e})")
+        })
     }
 
     /// Returns nearby entities, optionally filtered by a namespaced kind such as
@@ -366,6 +404,36 @@ fn progress(a: [f64; 2], b: [f64; 2], p: [f64; 2]) -> f64 {
 
 fn dist(a: [f64; 2], b: [f64; 2]) -> f64 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
+}
+
+fn is_hostile(kind: &str) -> bool {
+    matches!(
+        kind.rsplit(':').next().unwrap_or(kind),
+        "blaze"
+            | "creeper"
+            | "drowned"
+            | "enderman"
+            | "ghast"
+            | "husk"
+            | "magma_cube"
+            | "phantom"
+            | "piglin_brute"
+            | "pillager"
+            | "ravager"
+            | "silverfish"
+            | "skeleton"
+            | "slime"
+            | "spider"
+            | "stray"
+            | "vex"
+            | "vindicator"
+            | "warden"
+            | "witch"
+            | "wither_skeleton"
+            | "zoglin"
+            | "zombie"
+            | "zombie_villager"
+    )
 }
 
 /// The point `d` blocks further along the line from `from`, on segment `seg` (ending at
@@ -927,8 +995,7 @@ pub fn mine(
     let mut mined = 0;
     let result = (|| {
         if let Some(tool) = trip.tool.as_deref() {
-            bot.require_item(tool, 1)?;
-            bot.select_item(tool)?;
+            bot.ensure_hotbar_item(tool, 1)?;
         }
         while mined < count {
             let me = bot.me()?;
@@ -1157,7 +1224,21 @@ fn go_inner(
     for attempt in 0..64 {
         let me = bot.me()?;
         let started = std::time::Instant::now();
-        let (path, read) = bot.plan_loaded(me.feet, goal, settings)?;
+        let mut planning = settings.clone();
+        planning.avoid = bot
+            .entities(12.0, None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| is_hostile(&e.kind))
+            .map(|e| {
+                [
+                    e.pos[0].floor() as i32,
+                    e.pos[1].floor() as i32,
+                    e.pos[2].floor() as i32,
+                ]
+            })
+            .collect();
+        let (path, read) = bot.plan_loaded(me.feet, goal, &planning)?;
         log(&format!(
             "read and planned in {} ms",
             started.elapsed().as_millis()
