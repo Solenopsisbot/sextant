@@ -372,3 +372,63 @@ function refreshWorld(){if(!selected)return;api('/api/world?bot='+encodeURICompo
 function send(){if(!selected)return $('log').textContent='select a bot first';let c=$('cmd').value;api('/api/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bot:selected,command:c})}).then(r=>r.text()).then(t=>{$('log').textContent=t;poll()})}
 const canvas=$('map');canvas.addEventListener('pointerdown',e=>{drag={x:e.clientX,y:e.clientY};canvas.setPointerCapture(e.pointerId)});canvas.addEventListener('pointermove',e=>{if(!drag)return;cam.yaw+=(e.clientX-drag.x)*.5;cam.pitch=Math.max(-80,Math.min(80,cam.pitch+(e.clientY-drag.y)*.5));drag={x:e.clientX,y:e.clientY};draw()});canvas.addEventListener('pointerup',()=>drag=null);canvas.addEventListener('wheel',e=>{e.preventDefault();cam.zoom=Math.max(3,Math.min(40,cam.zoom-e.deltaY*.01));draw()},{passive:false});$('layer').addEventListener('input',draw);setInterval(()=>{poll();refreshWorld()},1500);poll();try{ws=new WebSocket(`ws://${location.host}/ws${authQuery()}`);ws.onmessage=e=>{try{let d=JSON.parse(e.data);if(d.bots)drawBots(d)}catch{}}}catch{}
 </script>"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    fn config(root: PathBuf) -> FleetConfig {
+        FleetConfig {
+            bots: Vec::new(),
+            bind: "127.0.0.1:0".into(),
+            textures: Some(root),
+            auth_token: Some("secret".into()),
+            scheduler: None,
+        }
+    }
+
+    #[test]
+    fn protected_texture_endpoint_serves_pack_bytes() {
+        let root = std::env::temp_dir().join(format!("sextant-pack-{}", std::process::id()));
+        let file = root.join("assets/minecraft/textures/block/stone.png");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"png").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let cfg = config(root.clone());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handle(&mut stream, &cfg).unwrap();
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        write!(
+            client,
+            "GET /textures/minecraft/stone.png?token=secret HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        server.join().unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200 OK"));
+        assert!(response.ends_with(b"png"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn protected_api_rejects_missing_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let cfg = config(std::env::temp_dir());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handle(&mut stream, &cfg).unwrap();
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        write!(client, "GET /api/state HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 401 Unauthorized"));
+    }
+}
