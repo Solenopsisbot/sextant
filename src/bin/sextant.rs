@@ -47,8 +47,8 @@ struct Cli {
     #[arg(long, global = true, default_value = ".sextant-waypoints.toml")]
     waypoints: PathBuf,
     /// Task file used by pause/resume
-    #[arg(long, global = true, default_value = ".sextant-task.toml")]
-    task: PathBuf,
+    #[arg(long = "task", global = true, default_value = ".sextant-task.toml")]
+    task_file: PathBuf,
     /// Optional cross-process reservation file for fleet coordination
     #[arg(long, global = true)]
     reservation: Option<PathBuf>,
@@ -400,10 +400,10 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Cmd::Resume => {
             let record: TaskRecord = toml::from_str(
-                &fs::read_to_string(&cli.task)
-                    .map_err(|e| format!("{}: {e}", cli.task.display()))?,
+                &fs::read_to_string(&cli.task_file)
+                    .map_err(|e| format!("{}: {e}", cli.task_file.display()))?,
             )
-            .map_err(|e| format!("{}: {e}", cli.task.display()))?;
+            .map_err(|e| format!("{}: {e}", cli.task_file.display()))?;
             let mut bot = Bot::connect(
                 cli.socket
                     .as_deref()
@@ -426,7 +426,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 &trip,
                 |line| eprintln!("{line}"),
             )?;
-            let _ = fs::remove_file(&cli.task);
+            let _ = fs::remove_file(&cli.task_file);
             println!("resumed to {:?}", record.target);
             Ok(())
         }
@@ -989,10 +989,10 @@ fn run(cli: Cli) -> Result<(), String> {
             };
             let started = std::time::Instant::now();
             fs::write(
-                &cli.task,
+                &cli.task_file,
                 toml::to_string(&TaskRecord { target: [x, y, z] }).map_err(|e| e.to_string())?,
             )
-            .map_err(|e| format!("{}: {e}", cli.task.display()))?;
+            .map_err(|e| format!("{}: {e}", cli.task_file.display()))?;
             let trip = bot::Trip {
                 settings: settings.clone(),
                 style: &style,
@@ -1009,7 +1009,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 started.elapsed().as_secs_f32(),
                 style.name
             );
-            let _ = fs::remove_file(&cli.task);
+            let _ = fs::remove_file(&cli.task_file);
             Ok(())
         }
         Cmd::Portal(PortalArgs {

@@ -153,6 +153,9 @@ colors, so the view remains useful while a pack is incomplete. `/api/state` is t
 snapshot. Keep it on a private LAN or behind an authenticated reverse proxy before exposing it beyond
 a trusted network.
 
+Drag the canvas to orbit, use the wheel to zoom, and change the Y layer to inspect vertical slices.
+Entity snapshots from Horizon are drawn as live markers and are refreshed with the loaded block view.
+
 ## Styles
 
 | Preset | Turning | Reactions | Walk | Extras |
