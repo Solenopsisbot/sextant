@@ -13,6 +13,8 @@ sextant --socket .flotilla/ctl-Miner.sock --build --tool iron_pickaxe go 31 101 
 sextant --socket ... plan 120 64 -40        # print the route without moving
 sextant --socket ... mine diamond_ore --count 16
 sextant --socket ... --cache world.sxrg eta 120 64 -40
+sextant --socket ... waypoint save home
+sextant --socket ... waypoint go home
 sextant styles                               # the presets and their knobs
 ```
 
@@ -41,6 +43,10 @@ sextant styles                               # the presets and their knobs
 - **Mines goals**: `mine` finds loaded matching blocks, walks to a reachable face, breaks them through
   Horizon's normal action, and repeats for a count.
 - **Caches**: `--cache` stores complete terrain tiles in a compact versioned file for later planning.
+- **Waypoints**: named feet positions can be saved, listed, and revisited.
+- **Sprint-jumps**: long flat runs use two-block sprint jumps when the route and headroom allow it.
+- **Blueprints**: the library validates JSON blueprints, orders supports before walls, and rotates them
+  around Y for a future live builder.
 
 ## Styles
 

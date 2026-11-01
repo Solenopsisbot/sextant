@@ -695,10 +695,15 @@ impl<'a> Walker<'a> {
             let forward = facing && flat > 0.15;
             since_jump = since_jump.map(|t| t + 1);
             let risen = me.pos[1] > start_y + 0.3;
-            let jump = step.kind == Kind::Ascend
+            let jump = matches!(step.kind, Kind::Ascend | Kind::SprintJump)
                 && me.on_ground
                 && !risen
-                && flat < 1.3
+                && flat
+                    < if step.kind == Kind::SprintJump {
+                        2.3
+                    } else {
+                        1.3
+                    }
                 && since_jump.is_none_or(|t| t > 10);
             if jump {
                 since_jump = Some(0);
@@ -709,7 +714,14 @@ impl<'a> Walker<'a> {
             let replies = self.bot.batch(&[
                 format!("look {yaw} {pitch}"),
                 format!("key w {}", if forward { "down" } else { "up" }),
-                "key ctrl up".into(),
+                format!(
+                    "key ctrl {}",
+                    if step.kind == Kind::SprintJump {
+                        "down"
+                    } else {
+                        "up"
+                    }
+                ),
                 format!("key space {}", if jump { "down" } else { "up" }),
                 format!("key shift {}", if sneak { "down" } else { "up" }),
                 "state".into(),

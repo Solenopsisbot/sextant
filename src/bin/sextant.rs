@@ -7,10 +7,12 @@
 //! ```
 
 use clap::{Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 use sextant::bot::{self, Bot};
 use sextant::planner::{Goal, Settings};
 use sextant::style::Style;
 use std::path::PathBuf;
+use std::{collections::BTreeMap, fs};
 
 #[derive(Parser)]
 #[command(version, about = "Pathing for Horizon bots, from robot to player-like")]
@@ -39,6 +41,9 @@ struct Cli {
     /// Persistent terrain cache for plan and eta commands
     #[arg(long, global = true)]
     cache: Option<PathBuf>,
+    /// Waypoint file for save/list/go commands
+    #[arg(long, global = true, default_value = ".sextant-waypoints.toml")]
+    waypoints: PathBuf,
     /// Print every step, and where the bot was when one fails
     #[arg(long, short, global = true)]
     verbose: bool,
@@ -69,7 +74,28 @@ enum Cmd {
     Status,
     /// Mine matching blocks in nearest-first order
     Mine(MineArgs),
+    /// Save, list, or navigate to named coordinates
+    Waypoint(WaypointArgs),
 }
+
+#[derive(clap::Args)]
+struct WaypointArgs {
+    #[command(subcommand)]
+    action: WaypointAction,
+}
+
+#[derive(Subcommand)]
+enum WaypointAction {
+    /// Save the bot's current feet position under NAME
+    Save { name: String },
+    /// List saved waypoints
+    List,
+    /// Walk to NAME
+    Go { name: String },
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Waypoints(BTreeMap<String, [i32; 3]>);
 
 #[derive(clap::Args)]
 struct MineArgs {
@@ -203,6 +229,66 @@ fn run(cli: Cli) -> Result<(), String> {
                 eprintln!("{line}")
             })?;
             println!("mined {mined} block(s)");
+            Ok(())
+        }
+        Cmd::Waypoint(WaypointArgs { action }) => {
+            let path = cli.waypoints.clone();
+            let mut waypoints = fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| toml::from_str::<Waypoints>(&s).ok())
+                .unwrap_or_default();
+            match action {
+                WaypointAction::List => {
+                    for (name, pos) in &waypoints.0 {
+                        println!("{name}: {} {} {}", pos[0], pos[1], pos[2]);
+                    }
+                }
+                WaypointAction::Save { name } => {
+                    let mut bot = Bot::connect(
+                        cli.socket
+                            .as_deref()
+                            .ok_or("--socket: which bot (its control socket)")?,
+                    )?;
+                    let pos = bot.me()?.feet;
+                    waypoints.0.insert(name.clone(), pos);
+                    fs::write(
+                        &path,
+                        toml::to_string_pretty(&waypoints).map_err(|e| e.to_string())?,
+                    )
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                    println!("saved {name} at {pos:?} ({})", path.display());
+                }
+                WaypointAction::Go { name } => {
+                    let pos = waypoints
+                        .0
+                        .get(&name)
+                        .copied()
+                        .ok_or_else(|| format!("unknown waypoint {name}"))?;
+                    let mut bot = Bot::connect(
+                        cli.socket
+                            .as_deref()
+                            .ok_or("--socket: which bot (its control socket)")?,
+                    )?;
+                    let trip = bot::Trip {
+                        settings: settings.clone(),
+                        style: &style,
+                        seed: cli.seed,
+                        verbose: cli.verbose,
+                        block: cli.block.clone(),
+                        tool: cli.tool.clone(),
+                    };
+                    bot::go(
+                        &mut bot,
+                        Goal {
+                            pos,
+                            radius: cli.radius,
+                        },
+                        &trip,
+                        |line| eprintln!("{line}"),
+                    )?;
+                    println!("arrived at waypoint {name} ({pos:?})");
+                }
+            }
             Ok(())
         }
         Cmd::Plan(Target { x, y, z }) => {
