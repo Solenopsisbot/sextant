@@ -78,6 +78,8 @@ enum Cmd {
     Status,
     /// Print movement and travel capabilities reported by Horizon
     Capabilities,
+    /// Craft a supported player-inventory recipe
+    Craft(CraftArgs),
     /// Mine matching blocks in nearest-first order
     Mine(MineArgs),
     /// Save, list, or navigate to named coordinates
@@ -132,6 +134,13 @@ struct MineArgs {
     /// Search radius for loaded matching blocks
     #[arg(long, default_value_t = 64)]
     search_radius: i32,
+}
+
+#[derive(clap::Args)]
+struct CraftArgs {
+    recipe: String,
+    #[arg(long, short, default_value_t = 1)]
+    times: u32,
 }
 
 #[derive(clap::Args)]
@@ -323,6 +332,15 @@ fn run(cli: Cli) -> Result<(), String> {
                 serde_json::to_string_pretty(&bot.travel_capabilities()?)
                     .map_err(|e| e.to_string())?
             );
+            Ok(())
+        }
+        Cmd::Craft(CraftArgs { recipe, times }) => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            println!("crafted {} items", bot.craft(&recipe, times)?);
             Ok(())
         }
         Cmd::Eta(Target { x, y, z }) => {

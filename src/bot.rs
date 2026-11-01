@@ -195,6 +195,58 @@ impl Bot {
         }
     }
 
+    /// Craft one of the small player-inventory recipes using Horizon's menu slot controls.
+    /// Returns the number of output items produced.
+    pub fn craft(&mut self, recipe: &str, times: u32) -> Result<u32, String> {
+        let (inputs, output, amount) = match recipe.strip_prefix("minecraft:").unwrap_or(recipe) {
+            "planks" => (vec![("log", 1, 100)], "planks", 4),
+            "sticks" => (vec![("planks", 2, 100), ("planks", 2, 102)], "sticks", 4),
+            "crafting_table" => (
+                vec![
+                    ("planks", 1, 100),
+                    ("planks", 1, 101),
+                    ("planks", 1, 102),
+                    ("planks", 1, 103),
+                ],
+                "crafting_table",
+                1,
+            ),
+            "torch" | "torches" => (vec![("coal", 1, 100), ("stick", 1, 102)], "torch", 4),
+            other => {
+                return Err(format!(
+                    "unsupported recipe {other}; supported: planks, sticks, crafting_table, torches"
+                ));
+            }
+        };
+        let mut made = 0;
+        for _ in 0..times {
+            let inv = self.inventory()?;
+            let mut used = Vec::new();
+            for (item, _, _) in &inputs {
+                let want = format!("minecraft:{item}");
+                let slot = inv["hotbar"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .chain(inv["main"].as_array().into_iter().flatten())
+                    .find(|s| s["item"].as_str() == Some(&want))
+                    .and_then(|s| s["slot"].as_u64())
+                    .ok_or_else(|| format!("need {item} to craft {recipe}"))?;
+                used.push(slot);
+            }
+            self.cmd("open-inventory")?;
+            for (slot, (_, _, grid)) in used.into_iter().zip(&inputs) {
+                self.cmd(&format!("click-slot {slot}"))?;
+                self.cmd(&format!("click-slot {grid}"))?;
+            }
+            self.cmd("click-slot 200")?;
+            self.cmd("close")?;
+            made += amount;
+        }
+        let _ = output;
+        Ok(made)
+    }
+
     /// Returns nearby entities, optionally filtered by a namespaced kind such as
     /// `minecraft:pig` or `minecraft:item`.
     pub fn entities(&mut self, radius: f64, kind: Option<&str>) -> Result<Vec<Entity>, String> {
