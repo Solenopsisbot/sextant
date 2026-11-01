@@ -24,6 +24,13 @@ pub struct FleetConfig {
     /// directory containing `assets/<namespace>/textures/block/*.png`.
     #[serde(default)]
     pub textures: Option<PathBuf>,
+    /// Optional bearer token for API, texture, and WebSocket access. The root HTML remains public
+    /// so a browser can load the login shell before supplying the token.
+    #[serde(default)]
+    pub auth_token: Option<String>,
+    /// Optional scheduler state file surfaced in fleet snapshots.
+    #[serde(default)]
+    pub scheduler: Option<PathBuf>,
 }
 fn default_bind() -> String {
     "127.0.0.1:8765".into()
@@ -68,6 +75,16 @@ fn handle(stream: &mut TcpStream, config: &FleetConfig) -> Result<(), String> {
         .filter_map(|l| l.split_once(':'))
         .map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_owned()))
         .collect();
+    let request_target = first.split_whitespace().nth(1).unwrap_or("/");
+    let protected = request_target != "/";
+    if protected && !authorized(config, request_target, &headers) {
+        return write_http(
+            stream,
+            "401 Unauthorized",
+            "text/plain",
+            b"Sextant token required",
+        );
+    }
     if first.starts_with("GET /ws") {
         let key = headers
             .get("sec-websocket-key")
@@ -105,6 +122,24 @@ fn handle(stream: &mut TcpStream, config: &FleetConfig) -> Result<(), String> {
     }
 }
 
+fn authorized(config: &FleetConfig, target: &str, headers: &BTreeMap<String, String>) -> bool {
+    let Some(expected) = config
+        .auth_token
+        .as_deref()
+        .filter(|token| !token.is_empty())
+    else {
+        return true;
+    };
+    headers
+        .get("x-sextant-token")
+        .is_some_and(|token| token == expected)
+        || target
+            .split("token=")
+            .nth(1)
+            .and_then(|value| value.split('&').next())
+            .is_some_and(|token| token == expected)
+}
+
 fn texture(stream: &mut TcpStream, config: &FleetConfig, request_path: &str) -> Result<(), String> {
     let Some(root) = config.textures.as_ref() else {
         return write_http(
@@ -114,7 +149,8 @@ fn texture(stream: &mut TcpStream, config: &FleetConfig, request_path: &str) -> 
             b"textures are not configured",
         );
     };
-    let relative = request_path.strip_prefix("/textures/").unwrap_or("");
+    let clean_path = request_path.split('?').next().unwrap_or(request_path);
+    let relative = clean_path.strip_prefix("/textures/").unwrap_or("");
     if relative.is_empty()
         || relative.contains("..")
         || relative.contains('\\')
@@ -191,8 +227,18 @@ fn snapshots(config: &FleetConfig) -> Value {
     Value::Object(map)
 }
 fn state(config: &FleetConfig) -> String {
-    json!({"bots": snapshots(config), "capabilities": ["state", "command", "world", "websocket"]})
+    json!({"bots": snapshots(config), "jobs": jobs(config), "capabilities": ["state", "command", "world", "websocket", "jobs"]})
         .to_string()
+}
+fn jobs(config: &FleetConfig) -> Value {
+    let Some(path) = config.scheduler.as_ref() else {
+        return Value::Array(Vec::new());
+    };
+    match crate::swarm::Scheduler::open(path, 120) {
+        Ok(scheduler) => serde_json::to_value(scheduler.jobs().collect::<Vec<_>>())
+            .unwrap_or(Value::Array(Vec::new())),
+        Err(error) => json!({"error": error}),
+    }
 }
 fn world(config: &FleetConfig, path: &str) -> String {
     let name = path
@@ -210,7 +256,7 @@ fn world(config: &FleetConfig, path: &str) -> String {
             let x = p[0].as_f64().unwrap_or(0.0) as i32;
             let y = p[1].as_f64().unwrap_or(64.0) as i32;
             let z = p[2].as_f64().unwrap_or(0.0) as i32;
-            b.cmd(&format!(
+            let mut blocks = b.cmd(&format!(
                 "blocks {} {} {} {} {} {}",
                 x - 16,
                 y - 8,
@@ -218,7 +264,13 @@ fn world(config: &FleetConfig, path: &str) -> String {
                 x + 16,
                 y + 8,
                 z + 16
-            ))
+            ))?;
+            if let Ok(entities) = b.cmd("entities 48")
+                && let Some(object) = blocks.as_object_mut()
+            {
+                object.insert("entities".into(), entities["entities"].clone());
+            }
+            Ok(blocks)
         })
         .unwrap_or_else(|e| json!({"error":e}));
     value.to_string()
@@ -299,21 +351,23 @@ canvas{width:100%;height:calc(100vh - 120px);min-height:460px;background:#0b0f13
 .toolbar{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-bottom:8px}pre{white-space:pre-wrap;max-height:180px;overflow:auto}
 </style>
 <header><b>Sextant Spectator</b><span id="conn" class="muted">connecting…</span><span id="selected" class="muted">no bot selected</span></header>
-<main><section class="panel"><div id="bots"></div><div class="toolbar"><label>Layer <input id="layer" type="number" value="64" style="width:65px"></label><button onclick="refreshWorld()">Refresh world</button></div><div class="toolbar"><input id="cmd" placeholder="status or command"><button onclick="send()">Send</button></div><pre id="log"></pre><p class="muted">Click a bot to follow it. The renderer uses loaded block state data from Horizon and never writes saves.</p></section>
+<main><section class="panel"><div id="bots"></div><div id="jobs"></div><div class="toolbar"><label>Layer <input id="layer" type="number" value="64" style="width:65px"></label><button onclick="refreshWorld()">Refresh world</button></div><div class="toolbar"><input id="cmd" placeholder="status or command"><button onclick="send()">Send</button></div><pre id="log"></pre><p class="muted">Click a bot to follow it. The renderer uses loaded block state data from Horizon and never writes saves.</p></section>
 <section class="panel"><canvas id="map" width="1200" height="760"></canvas><div class="muted">Isometric spectator view · scroll/zoom is intentionally kept deterministic for headless monitoring.</div></section></main>
 <script>
-let ws,selected=null,lastState=null,lastWorld=null;const textures=new Map();const $=id=>document.getElementById(id);
+let ws,selected=null,lastState=null,lastWorld=null;const textures=new Map();const $=id=>document.getElementById(id);const token=localStorage.getItem('sextantToken')||prompt('Sextant token (leave blank if disabled)')||'';if(token)localStorage.setItem('sextantToken',token);
 const colors={grass:'#6ba34b',dirt:'#8a5a3b',stone:'#777',cobble:'#666',wood:'#9a6b3f',log:'#76502f',planks:'#b18855',sand:'#d9c27b',glass:'#9bd7e5',water:'#3c79c9',lava:'#d85d25',leaves:'#3e7d45',ore:'#9ca6af',brick:'#98584c',obsidian:'#252039',snow:'#e8f2f7',ice:'#9fd7e8'};
 function color(state){let s=(state||'').toLowerCase();for(const [k,v] of Object.entries(colors))if(s.includes(k))return v;let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))>>>0;return `hsl(${h%360} 32% 45%)`}
-function textureUrl(state){let n=(state||'').split('[')[0];return '/textures/'+n+'.png'}
+function authQuery(){return token?'?token='+encodeURIComponent(token):''}function api(path,options={}){return fetch(path,{...options,headers:{...(options.headers||{}),...(token?{'X-Sextant-Token':token}:{})}})}
+function textureUrl(state){let n=(state||'').split('[')[0];return '/textures/'+n+'.png'+authQuery()}
 function texture(state){let url=textureUrl(state),img=textures.get(url);if(img===undefined){img=new Image();textures.set(url,img);img.onload=draw;img.onerror=()=>{textures.set(url,null);draw()};img.src=url}return img}
 function pos(v){return v?.player?.position||[0,0,0]}
 function draw(){let c=$('map'),g=c.getContext('2d');g.clearRect(0,0,c.width,c.height);g.save();g.translate(c.width/2,c.height/2+80);let scale=12;let layer=Number($('layer').value)||64;for(const b of (lastWorld?.blocks||[])){if(b[1]!==layer)continue;let dx=b[0]-(lastWorld.from?.[0]||0),dz=b[2]-(lastWorld.from?.[2]||0);let sx=(dx-dz)*scale*.5,sy=(dx+dz)*scale*.25;let img=texture(b[3]);g.beginPath();g.moveTo(sx,sy);g.lineTo(sx+scale*.5,sy+scale*.25);g.lineTo(sx,sy+scale*.5);g.lineTo(sx-scale*.5,sy+scale*.25);g.closePath();if(img&&img.complete&&img.naturalWidth){g.save();g.clip();g.drawImage(img,sx-scale*.5,sy,scale,scale*.5);g.restore()}else{g.fillStyle=color(b[3]);g.fill();}}
-for(const [name,v] of Object.entries(lastState?.bots||{})){let p=pos(v),dx=p[0]-(lastWorld?.from?.[0]||0),dz=p[2]-(lastWorld?.from?.[2]||0);let sx=(dx-dz)*scale*.5,sy=(dx+dz)*scale*.25-(p[1]-layer)*scale*.45;g.fillStyle='#7fda9b';g.beginPath();g.arc(sx,sy,7,0,7);g.fill();g.fillStyle='#fff';g.fillText(name,sx+9,sy)}g.restore();}
-function drawBots(d){lastState=d;let a=Object.entries(d.bots||{});$('bots').innerHTML=a.map(([n,v])=>`<div class="bot ${selected===n?'selected':''}" onclick="selectBot('${n}')"><b>${n}</b> <span class="ok">${v.player?'online':'offline'}</span><br><span class="muted">${JSON.stringify(pos(v))}</span></div>`).join('');if(selected&&d.bots[selected]?.player){$('layer').value=Math.floor(pos(d.bots[selected])[1])}draw()}
+for(const [name,v] of Object.entries(lastState?.bots||{})){let p=pos(v),dx=p[0]-(lastWorld?.from?.[0]||0),dz=p[2]-(lastWorld?.from?.[2]||0);let sx=(dx-dz)*scale*.5,sy=(dx+dz)*scale*.25-(p[1]-layer)*scale*.45;g.fillStyle='#7fda9b';g.beginPath();g.arc(sx,sy,7,0,7);g.fill();g.fillStyle='#fff';g.fillText(name,sx+9,sy)}
+for(const e of (lastWorld?.entities||[])){let p=e.pos||[0,0,0];if(Math.abs(p[1]-layer)>2)continue;let dx=p[0]-(lastWorld?.from?.[0]||0),dz=p[2]-(lastWorld?.from?.[2]||0),sx=(dx-dz)*scale*.5,sy=(dx+dz)*scale*.25-(p[1]-layer)*scale*.45;g.fillStyle='#f06b9a';g.beginPath();g.moveTo(sx,sy-6);g.lineTo(sx+5,sy+5);g.lineTo(sx-5,sy+5);g.closePath();g.fill();}g.restore();}
+function drawBots(d){lastState=d;let a=Object.entries(d.bots||{});$('bots').innerHTML=a.map(([n,v])=>`<div class="bot ${selected===n?'selected':''}" onclick="selectBot('${n}')"><b>${n}</b> <span class="ok">${v.player?'online':'offline'}</span><br><span class="muted">${JSON.stringify(pos(v))}</span></div>`).join('');$('jobs').innerHTML=(d.jobs||[]).map(j=>`<div class="muted">${j.id}: ${j.status}${j.worker?' · '+j.worker:''}</div>`).join('');if(selected&&d.bots[selected]?.player){$('layer').value=Math.floor(pos(d.bots[selected])[1])}draw()}
 function selectBot(n){selected=n;$('selected').textContent=n;drawBots(lastState||{bots:{}});refreshWorld()}
-function poll(){fetch('/api/state').then(r=>r.json()).then(d=>{drawBots(d);$('conn').textContent='live'}).catch(()=>$('conn').textContent='offline')}
-function refreshWorld(){if(!selected)return;fetch('/api/world?bot='+encodeURIComponent(selected)).then(r=>r.json()).then(w=>{lastWorld=w;draw()}).catch(e=>$('log').textContent=e)}
-function send(){if(!selected)return $('log').textContent='select a bot first';let c=$('cmd').value;fetch('/api/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bot:selected,command:c})}).then(r=>r.text()).then(t=>{$('log').textContent=t;poll()})}
-$('layer').addEventListener('input',draw);setInterval(()=>{poll();refreshWorld()},1500);poll();try{ws=new WebSocket(`ws://${location.host}/ws`);ws.onmessage=e=>{try{let d=JSON.parse(e.data);if(d.bots)drawBots(d)}catch{}}}catch{}
+function poll(){api('/api/state').then(r=>r.json()).then(d=>{drawBots(d);$('conn').textContent='live'}).catch(()=>$('conn').textContent='offline')}
+function refreshWorld(){if(!selected)return;api('/api/world?bot='+encodeURIComponent(selected)).then(r=>r.json()).then(w=>{lastWorld=w;draw()}).catch(e=>$('log').textContent=e)}
+function send(){if(!selected)return $('log').textContent='select a bot first';let c=$('cmd').value;api('/api/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bot:selected,command:c})}).then(r=>r.text()).then(t=>{$('log').textContent=t;poll()})}
+$('layer').addEventListener('input',draw);setInterval(()=>{poll();refreshWorld()},1500);poll();try{ws=new WebSocket(`ws://${location.host}/ws${authQuery()}`);ws.onmessage=e=>{try{let d=JSON.parse(e.data);if(d.bots)drawBots(d)}catch{}}}catch{}
 </script>"#;

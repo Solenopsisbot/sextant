@@ -28,6 +28,9 @@ sextant --socket ... portal 10 64 10
 sextant --socket ... capabilities
 sextant task validate outpost.toml
 sextant --socket ... task run outpost.toml
+sextant task status outpost.toml
+sextant swarm --state fleet.json enqueue mine-iron iron.toml --priority 10
+sextant swarm --state fleet.json claim Miner
 sextant dashboard --fleet sextant-fleet.toml   # browser + WebSocket control plane
 sextant styles                               # the presets and their knobs
 ```
@@ -104,7 +107,14 @@ text = "outpost supply run complete"
 Validate it with `sextant task validate outpost.toml`, then run it with
 `sextant --socket .flotilla/ctl-Miner.sock task run outpost.toml`. Supported steps are `go`,
 `mine`, `craft`, `farm`, `chat`, `wait`, and `status`. A failed step stops the plan while completed
-steps remain visible in chat.
+steps remain visible in chat. The state file is atomically updated after every step, so rerunning the
+same command retries only the interrupted step; `task status` reports the durable checkpoint and
+`--restart` intentionally starts over.
+
+The `swarm` command manages a durable priority queue shared by workers. Jobs have expiring leases,
+renewal, retry budgets, deterministic priority ordering, and reassignment when a worker disappears:
+`enqueue`, `claim`, `renew`, `complete`, `fail`, and `list` are all safe to call from separate worker
+processes using the same JSON or TOML state file.
 
 ## Headless fleet dashboard
 
@@ -116,6 +126,10 @@ safety checks. Create a fleet file:
 bind = "127.0.0.1:8765"
 # Optional: a prepared Horizon resource root or resource-pack directory.
 textures = ".local/horizon-client/26.3"
+# Optional bearer token for API, texture, and WebSocket access.
+auth_token = "change-me"
+# Optional shared swarm scheduler state surfaced in the dashboard.
+scheduler = "fleet.json"
 
 [[bots]]
 name = "Miner"
@@ -126,7 +140,9 @@ name = "Builder"
 socket = ".flotilla/ctl-Builder.sock"
 ```
 
-Start it with `sextant dashboard --fleet sextant-fleet.toml`. The page shows online state and
+Start it with `sextant dashboard --fleet sextant-fleet.toml`. If `auth_token` is configured, the page
+prompts once and stores it in browser local storage; all API, texture, and WebSocket requests then
+carry the token. The page shows online state and
 positions, accepts control-socket commands, and renders an isometric, layer-selectable spectator view
 of the loaded world around a selected bot through `/api/world?bot=Miner`. When `textures` is set,
 the dashboard serves matching `assets/<namespace>/textures/block/*.png` files and paints those tiles

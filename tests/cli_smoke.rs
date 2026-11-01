@@ -44,6 +44,7 @@ fn help_lists_every_top_level_operation() {
         "farm",
         "task",
         "dashboard",
+        "swarm",
     ] {
         assert!(
             help.contains(command),
