@@ -3,6 +3,8 @@ pub mod build;
 pub mod coordination;
 pub mod dashboard;
 pub mod planner;
+pub mod spectator;
 pub mod style;
+pub mod swarm;
 pub mod tasks;
 pub mod world;

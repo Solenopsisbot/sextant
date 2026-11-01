@@ -20,6 +20,17 @@ pub struct FleetConfig {
     pub bots: Vec<BotConfig>,
     #[serde(default = "default_bind")]
     pub bind: String,
+    /// Optional resource-pack root. This can be a pack directory or a Horizon prepared-resource
+    /// directory containing `assets/<namespace>/textures/block/*.png`.
+    #[serde(default)]
+    pub textures: Option<PathBuf>,
+    /// Optional bearer token for API, texture, and WebSocket access. The root HTML remains public
+    /// so a browser can load the login shell before supplying the token.
+    #[serde(default)]
+    pub auth_token: Option<String>,
+    /// Optional scheduler state file surfaced in fleet snapshots.
+    #[serde(default)]
+    pub scheduler: Option<PathBuf>,
 }
 fn default_bind() -> String {
     "127.0.0.1:8765".into()
@@ -64,6 +75,16 @@ fn handle(stream: &mut TcpStream, config: &FleetConfig) -> Result<(), String> {
         .filter_map(|l| l.split_once(':'))
         .map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_owned()))
         .collect();
+    let request_target = first.split_whitespace().nth(1).unwrap_or("/");
+    let protected = request_target != "/";
+    if protected && !authorized(config, request_target, &headers) {
+        return write_http(
+            stream,
+            "401 Unauthorized",
+            "text/plain",
+            b"Sextant token required",
+        );
+    }
     if first.starts_with("GET /ws") {
         let key = headers
             .get("sec-websocket-key")
@@ -77,6 +98,9 @@ fn handle(stream: &mut TcpStream, config: &FleetConfig) -> Result<(), String> {
     } else {
         let method = first.split_whitespace().next().unwrap_or("GET");
         let path = first.split_whitespace().nth(1).unwrap_or("/");
+        if method == "GET" && path.starts_with("/textures/") {
+            return texture(stream, config, path);
+        }
         let body = if path == "/" {
             DASHBOARD.into()
         } else if path.starts_with("/api/state") {
@@ -98,6 +122,100 @@ fn handle(stream: &mut TcpStream, config: &FleetConfig) -> Result<(), String> {
     }
 }
 
+fn authorized(config: &FleetConfig, target: &str, headers: &BTreeMap<String, String>) -> bool {
+    let Some(expected) = config
+        .auth_token
+        .as_deref()
+        .filter(|token| !token.is_empty())
+    else {
+        return true;
+    };
+    headers
+        .get("x-sextant-token")
+        .is_some_and(|token| token == expected)
+        || target
+            .split("token=")
+            .nth(1)
+            .and_then(|value| value.split('&').next())
+            .is_some_and(|token| token == expected)
+}
+
+fn texture(stream: &mut TcpStream, config: &FleetConfig, request_path: &str) -> Result<(), String> {
+    let Some(root) = config.textures.as_ref() else {
+        return write_http(
+            stream,
+            "404 Not Found",
+            "text/plain",
+            b"textures are not configured",
+        );
+    };
+    let clean_path = request_path.split('?').next().unwrap_or(request_path);
+    let relative = clean_path.strip_prefix("/textures/").unwrap_or("");
+    if relative.is_empty()
+        || relative.contains("..")
+        || relative.contains('\\')
+        || !relative.ends_with(".png")
+    {
+        return write_http(
+            stream,
+            "400 Bad Request",
+            "text/plain",
+            b"invalid texture path",
+        );
+    }
+    let relative = relative.strip_suffix(".png").unwrap_or(relative);
+    let mut pieces = relative.splitn(2, '/');
+    let namespace = pieces.next().unwrap_or("minecraft");
+    let name = pieces.next().unwrap_or("");
+    if name.is_empty() || name.contains('/') {
+        return write_http(
+            stream,
+            "400 Bad Request",
+            "text/plain",
+            b"invalid texture name",
+        );
+    }
+    let assets = root.join("assets");
+    let base = if assets.is_dir() {
+        assets
+    } else {
+        root.clone()
+    };
+    let file = base
+        .join(namespace)
+        .join("textures")
+        .join("block")
+        .join(format!("{name}.png"));
+    match std::fs::read(file) {
+        Ok(bytes) => write_http_with_cache(stream, "200 OK", "image/png", &bytes),
+        Err(_) => write_http(stream, "404 Not Found", "image/png", &[]),
+    }
+}
+
+fn write_http(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) -> Result<(), String> {
+    write_http_with_cache(stream, status, content_type, body)
+}
+
+fn write_http_with_cache(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) -> Result<(), String> {
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: public, max-age=3600\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .map_err(|e| e.to_string())?;
+    stream.write_all(body).map_err(|e| e.to_string())
+}
+
 fn snapshots(config: &FleetConfig) -> Value {
     let mut map = serde_json::Map::new();
     for bot in &config.bots {
@@ -109,8 +227,18 @@ fn snapshots(config: &FleetConfig) -> Value {
     Value::Object(map)
 }
 fn state(config: &FleetConfig) -> String {
-    json!({"bots": snapshots(config), "capabilities": ["state", "command", "world", "websocket"]})
+    json!({"bots": snapshots(config), "jobs": jobs(config), "capabilities": ["state", "command", "world", "websocket", "jobs"]})
         .to_string()
+}
+fn jobs(config: &FleetConfig) -> Value {
+    let Some(path) = config.scheduler.as_ref() else {
+        return Value::Array(Vec::new());
+    };
+    match crate::swarm::Scheduler::open(path, 120) {
+        Ok(scheduler) => serde_json::to_value(scheduler.jobs().collect::<Vec<_>>())
+            .unwrap_or(Value::Array(Vec::new())),
+        Err(error) => json!({"error": error}),
+    }
 }
 fn world(config: &FleetConfig, path: &str) -> String {
     let name = path
@@ -128,7 +256,7 @@ fn world(config: &FleetConfig, path: &str) -> String {
             let x = p[0].as_f64().unwrap_or(0.0) as i32;
             let y = p[1].as_f64().unwrap_or(64.0) as i32;
             let z = p[2].as_f64().unwrap_or(0.0) as i32;
-            b.cmd(&format!(
+            let mut blocks = b.cmd(&format!(
                 "blocks {} {} {} {} {} {}",
                 x - 16,
                 y - 8,
@@ -136,7 +264,13 @@ fn world(config: &FleetConfig, path: &str) -> String {
                 x + 16,
                 y + 8,
                 z + 16
-            ))
+            ))?;
+            if let Ok(entities) = b.cmd("entities 48")
+                && let Some(object) = blocks.as_object_mut()
+            {
+                object.insert("entities".into(), entities["entities"].clone());
+            }
+            Ok(blocks)
         })
         .unwrap_or_else(|e| json!({"error":e}));
     value.to_string()
@@ -205,4 +339,96 @@ fn write_frame(stream: &mut TcpStream, payload: &[u8]) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-const DASHBOARD: &str = r#"<!doctype html><meta charset=utf-8><title>Sextant Fleet</title><style>body{font:14px system-ui;background:#10151c;color:#e8eef5;margin:0}header{padding:16px;background:#182431;position:sticky;top:0}main{display:grid;grid-template-columns:320px 1fr;gap:16px;padding:16px}button,input{padding:8px;background:#223344;color:#fff;border:1px solid #456;border-radius:4px}pre{white-space:pre-wrap}.bot{padding:10px;background:#182431;margin:6px 0;border-radius:5px}.ok{color:#7fda9b}canvas{width:100%;height:520px;background:#0b0f13;border:1px solid #345}</style><header><b>Sextant Fleet</b> <span id=conn>connecting…</span></header><main><section><div id=bots></div><input id=cmd placeholder='command, e.g. status'><button onclick=send()>Send</button><pre id=log></pre></section><section><canvas id=map width=900 height=520></canvas><p>Top-down loaded world view. Select a bot to inspect its state; commands are sent through the same authenticated control socket.</p></section></main><script>let ws,selected;const $=id=>document.getElementById(id);function draw(d){let c=$('map'),x=c.getContext('2d');x.clearRect(0,0,c.width,c.height);let a=Object.entries(d.bots||{});a.forEach(([n,v],i)=>{let p=v.player?.position||[0,0,0],px=c.width/2+p[0]*3,py=c.height/2+p[2]*3;x.fillStyle=['#7fda9b','#f4c95d','#df6b8b','#80bfff'][i%4];x.beginPath();x.arc(px,py,7,0,7);x.fill();x.fillText(n,px+10,py)});$('bots').innerHTML=a.map(([n,v])=>`<div class=bot onclick="selected='${n}'"><b>${n}</b> <span class=ok>${v.player?'online':'offline'}</span><br>${JSON.stringify(v.player?.position||v.error||{})}</div>`).join('')}function poll(){fetch('/api/state').then(r=>r.json()).then(d=>{draw(d);$('conn').textContent='live'}).catch(()=>$('conn').textContent='offline')}function send(){if(!selected)return $('log').textContent='select a bot first';let c=$('cmd').value;fetch('/api/command',{method:'POST',body:JSON.stringify({bot:selected,command:c})}).then(r=>r.text()).then(t=>$('log').textContent=t)}setInterval(poll,1000);poll();try{ws=new WebSocket(`ws://${location.host}/ws`);ws.onmessage=e=>{try{draw(JSON.parse(e.data))}catch{}}}catch{}</script>"#;
+const DASHBOARD: &str = r#"<!doctype html>
+<meta charset="utf-8"><title>Sextant Spectator</title>
+<style>
+:root{color-scheme:dark}body{font:14px system-ui;background:#10151c;color:#e8eef5;margin:0}
+header{padding:14px 18px;background:#182431;position:sticky;top:0;z-index:2;display:flex;gap:20px;align-items:center}
+main{display:grid;grid-template-columns:300px 1fr;gap:14px;padding:14px}.panel{background:#182431;border:1px solid #2d4356;border-radius:6px;padding:12px}
+button,input,select{padding:7px;background:#223344;color:#fff;border:1px solid #456;border-radius:4px}button{cursor:pointer}
+.bot{padding:9px;background:#203040;margin:6px 0;border-radius:5px;cursor:pointer}.bot.selected{outline:2px solid #7fda9b}.ok{color:#7fda9b}.muted{color:#9db0c0}
+canvas{width:100%;height:calc(100vh - 120px);min-height:460px;background:#0b0f13;border:1px solid #345;border-radius:5px;image-rendering:pixelated}
+.toolbar{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-bottom:8px}pre{white-space:pre-wrap;max-height:180px;overflow:auto}
+</style>
+<header><b>Sextant Spectator</b><span id="conn" class="muted">connecting…</span><span id="selected" class="muted">no bot selected</span></header>
+<main><section class="panel"><div id="bots"></div><div id="jobs"></div><div class="toolbar"><label>Layer <input id="layer" type="number" value="64" style="width:65px"></label><button onclick="refreshWorld()">Refresh world</button></div><div class="toolbar"><input id="cmd" placeholder="status or command"><button onclick="send()">Send</button></div><pre id="log"></pre><p class="muted">Click a bot to follow it. The renderer uses loaded block state data from Horizon and never writes saves.</p></section>
+<section class="panel"><canvas id="map" width="1200" height="760"></canvas><div class="muted">Isometric spectator view · scroll/zoom is intentionally kept deterministic for headless monitoring.</div></section></main>
+<script>
+let ws,selected=null,lastState=null,lastWorld=null,cam={yaw:45,pitch:35,zoom:12},drag=null;const textures=new Map();const $=id=>document.getElementById(id);const token=localStorage.getItem('sextantToken')||prompt('Sextant token (leave blank if disabled)')||'';if(token)localStorage.setItem('sextantToken',token);
+const colors={grass:'#6ba34b',dirt:'#8a5a3b',stone:'#777',cobble:'#666',wood:'#9a6b3f',log:'#76502f',planks:'#b18855',sand:'#d9c27b',glass:'#9bd7e5',water:'#3c79c9',lava:'#d85d25',leaves:'#3e7d45',ore:'#9ca6af',brick:'#98584c',obsidian:'#252039',snow:'#e8f2f7',ice:'#9fd7e8'};
+function color(state){let s=(state||'').toLowerCase();for(const [k,v] of Object.entries(colors))if(s.includes(k))return v;let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))>>>0;return `hsl(${h%360} 32% 45%)`}
+function authQuery(){return token?'?token='+encodeURIComponent(token):''}function api(path,options={}){return fetch(path,{...options,headers:{...(options.headers||{}),...(token?{'X-Sextant-Token':token}:{})}})}
+function textureUrl(state){let n=(state||'').split('[')[0];return '/textures/'+n+'.png'+authQuery()}
+function texture(state){let url=textureUrl(state),img=textures.get(url);if(img===undefined){img=new Image();textures.set(url,img);img.onload=draw;img.onerror=()=>{textures.set(url,null);draw()};img.src=url}return img}
+function pos(v){return v?.player?.position||[0,0,0]}
+function project(p,layer){let dx=p[0]-(lastWorld?.from?.[0]||0),dy=p[1]-layer,dz=p[2]-(lastWorld?.from?.[2]||0),a=cam.yaw*Math.PI/180,q=cam.pitch*Math.PI/180,x=dx*Math.cos(a)-dz*Math.sin(a),depth=dx*Math.sin(a)+dz*Math.cos(a);return [x*cam.zoom,(dy*Math.cos(q)-depth*Math.sin(q))*cam.zoom]}
+function draw(){let c=$('map'),g=c.getContext('2d');g.clearRect(0,0,c.width,c.height);g.save();g.translate(c.width/2,c.height/2+80);let scale=cam.zoom;let layer=Number($('layer').value)||64;for(const b of (lastWorld?.blocks||[])){if(b[1]!==layer)continue;let [sx,sy]=project([b[0],b[1],b[2]],layer);let img=texture(b[3]);g.beginPath();g.moveTo(sx,sy);g.lineTo(sx+scale*.5,sy+scale*.25);g.lineTo(sx,sy+scale*.5);g.lineTo(sx-scale*.5,sy+scale*.25);g.closePath();if(img&&img.complete&&img.naturalWidth){g.save();g.clip();g.drawImage(img,sx-scale*.5,sy,scale,scale*.5);g.restore()}else{g.fillStyle=color(b[3]);g.fill();}}
+for(const [name,v] of Object.entries(lastState?.bots||{})){let p=pos(v),[sx,sy]=project(p,layer);g.fillStyle='#7fda9b';g.beginPath();g.arc(sx,sy,7,0,7);g.fill();g.fillStyle='#fff';g.fillText(name,sx+9,sy)}
+for(const e of (lastWorld?.entities||[])){let p=e.pos||[0,0,0];if(Math.abs(p[1]-layer)>8)continue;let [sx,sy]=project(p,layer);g.fillStyle='#f06b9a';g.beginPath();g.moveTo(sx,sy-6);g.lineTo(sx+5,sy+5);g.lineTo(sx-5,sy+5);g.closePath();g.fill();}g.restore();}
+function drawBots(d){lastState=d;let a=Object.entries(d.bots||{});$('bots').innerHTML=a.map(([n,v])=>`<div class="bot ${selected===n?'selected':''}" onclick="selectBot('${n}')"><b>${n}</b> <span class="ok">${v.player?'online':'offline'}</span><br><span class="muted">${JSON.stringify(pos(v))}</span></div>`).join('');$('jobs').innerHTML=(d.jobs||[]).map(j=>`<div class="muted">${j.id}: ${j.status}${j.worker?' · '+j.worker:''}</div>`).join('');if(selected&&d.bots[selected]?.player){$('layer').value=Math.floor(pos(d.bots[selected])[1])}draw()}
+function selectBot(n){selected=n;$('selected').textContent=n;drawBots(lastState||{bots:{}});refreshWorld()}
+function poll(){api('/api/state').then(r=>r.json()).then(d=>{drawBots(d);$('conn').textContent='live'}).catch(()=>$('conn').textContent='offline')}
+function refreshWorld(){if(!selected)return;api('/api/world?bot='+encodeURIComponent(selected)).then(r=>r.json()).then(w=>{lastWorld=w;draw()}).catch(e=>$('log').textContent=e)}
+function send(){if(!selected)return $('log').textContent='select a bot first';let c=$('cmd').value;api('/api/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bot:selected,command:c})}).then(r=>r.text()).then(t=>{$('log').textContent=t;poll()})}
+const canvas=$('map');canvas.addEventListener('pointerdown',e=>{drag={x:e.clientX,y:e.clientY};canvas.setPointerCapture(e.pointerId)});canvas.addEventListener('pointermove',e=>{if(!drag)return;cam.yaw+=(e.clientX-drag.x)*.5;cam.pitch=Math.max(-80,Math.min(80,cam.pitch+(e.clientY-drag.y)*.5));drag={x:e.clientX,y:e.clientY};draw()});canvas.addEventListener('pointerup',()=>drag=null);canvas.addEventListener('wheel',e=>{e.preventDefault();cam.zoom=Math.max(3,Math.min(40,cam.zoom-e.deltaY*.01));draw()},{passive:false});$('layer').addEventListener('input',draw);setInterval(()=>{poll();refreshWorld()},1500);poll();try{ws=new WebSocket(`ws://${location.host}/ws${authQuery()}`);ws.onmessage=e=>{try{let d=JSON.parse(e.data);if(d.bots)drawBots(d)}catch{}}}catch{}
+</script>"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    fn config(root: PathBuf) -> FleetConfig {
+        FleetConfig {
+            bots: Vec::new(),
+            bind: "127.0.0.1:0".into(),
+            textures: Some(root),
+            auth_token: Some("secret".into()),
+            scheduler: None,
+        }
+    }
+
+    #[test]
+    fn protected_texture_endpoint_serves_pack_bytes() {
+        let root = std::env::temp_dir().join(format!("sextant-pack-{}", std::process::id()));
+        let file = root.join("assets/minecraft/textures/block/stone.png");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"png").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let cfg = config(root.clone());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handle(&mut stream, &cfg).unwrap();
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        write!(
+            client,
+            "GET /textures/minecraft/stone.png?token=secret HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        server.join().unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200 OK"));
+        assert!(response.ends_with(b"png"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn protected_api_rejects_missing_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let cfg = config(std::env::temp_dir());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handle(&mut stream, &cfg).unwrap();
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        write!(client, "GET /api/state HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 401 Unauthorized"));
+    }
+}

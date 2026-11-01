@@ -12,7 +12,7 @@ use sextant::bot::{self, Bot};
 use sextant::build::Blueprint;
 use sextant::planner::{Goal, Settings};
 use sextant::style::Style;
-use sextant::{dashboard, tasks};
+use sextant::{dashboard, swarm, tasks};
 use std::path::PathBuf;
 use std::{collections::BTreeMap, fs};
 
@@ -47,8 +47,8 @@ struct Cli {
     #[arg(long, global = true, default_value = ".sextant-waypoints.toml")]
     waypoints: PathBuf,
     /// Task file used by pause/resume
-    #[arg(long, global = true, default_value = ".sextant-task.toml")]
-    task: PathBuf,
+    #[arg(long = "task", global = true, default_value = ".sextant-task.toml")]
+    task_file: PathBuf,
     /// Optional cross-process reservation file for fleet coordination
     #[arg(long, global = true)]
     reservation: Option<PathBuf>,
@@ -116,6 +116,8 @@ enum Cmd {
     Task(TaskArgs),
     /// Serve the optional fleet dashboard and WebSocket control plane
     Dashboard(DashboardArgs),
+    /// Queue and lease durable work across a bot swarm
+    Swarm(SwarmArgs),
 }
 
 #[derive(clap::Args)]
@@ -182,7 +184,21 @@ enum TaskAction {
     /// Validate a plan without connecting to a bot
     Validate { file: PathBuf },
     /// Run all steps in order, announcing progress in game chat
-    Run { file: PathBuf },
+    Run {
+        file: PathBuf,
+        /// Durable state file; defaults to FILE.state.json
+        #[arg(long)]
+        state: Option<PathBuf>,
+        /// Discard prior progress and start from step one
+        #[arg(long)]
+        restart: bool,
+    },
+    /// Print durable progress without connecting to a bot
+    Status {
+        file: PathBuf,
+        #[arg(long)]
+        state: Option<PathBuf>,
+    },
 }
 
 #[derive(clap::Args)]
@@ -193,6 +209,44 @@ struct DashboardArgs {
     /// Override the fleet file's bind address
     #[arg(long)]
     bind: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct SwarmArgs {
+    /// JSON or TOML scheduler state file
+    #[arg(long, default_value = "sextant-swarm.json")]
+    state: PathBuf,
+    #[arg(long, default_value_t = 120)]
+    lease_seconds: u64,
+    #[command(subcommand)]
+    action: SwarmAction,
+}
+
+#[derive(Subcommand)]
+enum SwarmAction {
+    /// Add a task-plan path to the queue
+    Enqueue {
+        id: String,
+        task: String,
+        #[arg(long, default_value_t = 0)]
+        priority: u32,
+        #[arg(long, default_value_t = 3)]
+        max_attempts: u32,
+    },
+    /// Print all jobs and their lease state
+    List,
+    /// Claim the highest-priority available job for WORKER
+    Claim { worker: String },
+    /// Renew a worker's lease
+    Renew { id: String, worker: String },
+    /// Mark a leased job complete
+    Complete { id: String, worker: String },
+    /// Mark a leased job failed
+    Fail {
+        id: String,
+        worker: String,
+        error: String,
+    },
 }
 
 #[derive(clap::Args)]
@@ -346,10 +400,10 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Cmd::Resume => {
             let record: TaskRecord = toml::from_str(
-                &fs::read_to_string(&cli.task)
-                    .map_err(|e| format!("{}: {e}", cli.task.display()))?,
+                &fs::read_to_string(&cli.task_file)
+                    .map_err(|e| format!("{}: {e}", cli.task_file.display()))?,
             )
-            .map_err(|e| format!("{}: {e}", cli.task.display()))?;
+            .map_err(|e| format!("{}: {e}", cli.task_file.display()))?;
             let mut bot = Bot::connect(
                 cli.socket
                     .as_deref()
@@ -372,7 +426,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 &trip,
                 |line| eprintln!("{line}"),
             )?;
-            let _ = fs::remove_file(&cli.task);
+            let _ = fs::remove_file(&cli.task_file);
             println!("resumed to {:?}", record.target);
             Ok(())
         }
@@ -427,8 +481,13 @@ fn run(cli: Cli) -> Result<(), String> {
                 println!("valid task: {} step(s)", plan.steps.len());
                 Ok(())
             }
-            TaskAction::Run { file } => {
+            TaskAction::Run {
+                file,
+                state,
+                restart,
+            } => {
                 let plan = tasks::load(&file)?;
+                let state = state.unwrap_or_else(|| file.with_extension("state.json"));
                 let mut bot = Bot::connect(
                     cli.socket
                         .as_deref()
@@ -442,10 +501,27 @@ fn run(cli: Cli) -> Result<(), String> {
                     block: cli.block.clone(),
                     tool: cli.tool.clone(),
                 };
-                tasks::run(&mut bot, &plan, &trip, |step, total, line| {
-                    eprintln!("[{step}/{total}] {line}")
-                })?;
-                println!("task complete: {} step(s)", plan.steps.len());
+                let result = tasks::run_resumable(
+                    &mut bot,
+                    &plan,
+                    &trip,
+                    &state,
+                    restart,
+                    |step, total, line| eprintln!("[{step}/{total}] {line}"),
+                )?;
+                println!(
+                    "task {:?}: {}/{} steps ({} attempts)",
+                    result.status, result.current_step, result.total_steps, result.attempts
+                );
+                Ok(())
+            }
+            TaskAction::Status { file, state } => {
+                let path = state.unwrap_or_else(|| file.with_extension("state.json"));
+                let result = tasks::load_state(&path)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?
+                );
                 Ok(())
             }
         },
@@ -455,6 +531,54 @@ fn run(cli: Cli) -> Result<(), String> {
                 config.bind = bind;
             }
             dashboard::serve(config)
+        }
+        Cmd::Swarm(SwarmArgs {
+            state,
+            lease_seconds,
+            action,
+        }) => {
+            let mut scheduler = swarm::Scheduler::open(&state, lease_seconds)?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            match action {
+                SwarmAction::Enqueue {
+                    id,
+                    task,
+                    priority,
+                    max_attempts,
+                } => {
+                    scheduler.enqueue(id, task, priority, max_attempts)?;
+                    println!("queued");
+                }
+                SwarmAction::List => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&scheduler.jobs().collect::<Vec<_>>())
+                        .map_err(|e| e.to_string())?
+                ),
+                SwarmAction::Claim { worker } => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&scheduler.claim(&worker, now)?)
+                        .map_err(|e| e.to_string())?
+                ),
+                SwarmAction::Renew { id, worker } => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&scheduler.renew(&id, &worker, now)?)
+                        .map_err(|e| e.to_string())?
+                ),
+                SwarmAction::Complete { id, worker } => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&scheduler.complete(&id, &worker)?)
+                        .map_err(|e| e.to_string())?
+                ),
+                SwarmAction::Fail { id, worker, error } => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&scheduler.fail(&id, &worker, error)?)
+                        .map_err(|e| e.to_string())?
+                ),
+            }
+            Ok(())
         }
         Cmd::Craft(CraftArgs { recipe, times }) => {
             let mut bot = Bot::connect(
@@ -865,10 +989,10 @@ fn run(cli: Cli) -> Result<(), String> {
             };
             let started = std::time::Instant::now();
             fs::write(
-                &cli.task,
+                &cli.task_file,
                 toml::to_string(&TaskRecord { target: [x, y, z] }).map_err(|e| e.to_string())?,
             )
-            .map_err(|e| format!("{}: {e}", cli.task.display()))?;
+            .map_err(|e| format!("{}: {e}", cli.task_file.display()))?;
             let trip = bot::Trip {
                 settings: settings.clone(),
                 style: &style,
@@ -885,7 +1009,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 started.elapsed().as_secs_f32(),
                 style.name
             );
-            let _ = fs::remove_file(&cli.task);
+            let _ = fs::remove_file(&cli.task_file);
             Ok(())
         }
         Cmd::Portal(PortalArgs {
