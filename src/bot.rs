@@ -153,9 +153,46 @@ impl Bot {
     /// later break/place action fail after the bot has already walked to its target.
     pub fn ensure_hotbar_item(&mut self, item: &str, minimum: i64) -> Result<(), String> {
         self.require_item(item, minimum)?;
-        self.select_item(item).map(|_| ()).map_err(|e| {
-            format!("{item} is not usable from the hotbar; move it into a hotbar slot first ({e})")
-        })
+        let want = if item.contains(':') {
+            item.to_owned()
+        } else {
+            format!("minecraft:{item}")
+        };
+        let inv = self.inventory()?;
+        if inv["hotbar"]
+            .as_array()
+            .is_some_and(|slots| slots.iter().any(|s| s["item"].as_str() == Some(&want)))
+        {
+            self.select_item(item)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        } else {
+            let source = inv["main"]
+                .as_array()
+                .and_then(|slots| {
+                    slots
+                        .iter()
+                        .find(|s| s["item"].as_str() == Some(&want))
+                        .and_then(|s| s["slot"].as_u64())
+                })
+                .ok_or_else(|| format!("{item} is not in the inventory"))?;
+            let target = inv["hotbar"]
+                .as_array()
+                .and_then(|slots| {
+                    slots
+                        .iter()
+                        .find(|s| s["item"].is_null())
+                        .and_then(|s| s["slot"].as_u64())
+                })
+                .unwrap_or(0);
+            self.cmd("open-inventory")?;
+            self.cmd(&format!("click-slot {source}"))?;
+            self.cmd(&format!("click-slot {target}"))?;
+            self.cmd("close")?;
+            self.select_item(item)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
     }
 
     /// Returns nearby entities, optionally filtered by a namespaced kind such as

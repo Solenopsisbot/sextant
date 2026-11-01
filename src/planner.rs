@@ -252,7 +252,12 @@ impl Mover<'_> {
                             mine: jump_mine,
                             place: None,
                         },
-                        flat * 2.0 + JUMP + cm + cl,
+                        flat * 2.0
+                            + JUMP
+                            + cm
+                            + cl
+                            + self.avoidance(middle)
+                            + self.avoidance(landing),
                     ));
                 }
             }
