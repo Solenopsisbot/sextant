@@ -20,6 +20,10 @@ pub struct FleetConfig {
     pub bots: Vec<BotConfig>,
     #[serde(default = "default_bind")]
     pub bind: String,
+    /// Optional resource-pack root. This can be a pack directory or a Horizon prepared-resource
+    /// directory containing `assets/<namespace>/textures/block/*.png`.
+    #[serde(default)]
+    pub textures: Option<PathBuf>,
 }
 fn default_bind() -> String {
     "127.0.0.1:8765".into()
@@ -77,6 +81,9 @@ fn handle(stream: &mut TcpStream, config: &FleetConfig) -> Result<(), String> {
     } else {
         let method = first.split_whitespace().next().unwrap_or("GET");
         let path = first.split_whitespace().nth(1).unwrap_or("/");
+        if method == "GET" && path.starts_with("/textures/") {
+            return texture(stream, config, path);
+        }
         let body = if path == "/" {
             DASHBOARD.into()
         } else if path.starts_with("/api/state") {
@@ -96,6 +103,81 @@ fn handle(stream: &mut TcpStream, config: &FleetConfig) -> Result<(), String> {
         write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{body}", if path == "/" { "text/html; charset=utf-8" } else { "application/json" }, body.len()).map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+fn texture(stream: &mut TcpStream, config: &FleetConfig, request_path: &str) -> Result<(), String> {
+    let Some(root) = config.textures.as_ref() else {
+        return write_http(
+            stream,
+            "404 Not Found",
+            "text/plain",
+            b"textures are not configured",
+        );
+    };
+    let relative = request_path.strip_prefix("/textures/").unwrap_or("");
+    if relative.is_empty()
+        || relative.contains("..")
+        || relative.contains('\\')
+        || !relative.ends_with(".png")
+    {
+        return write_http(
+            stream,
+            "400 Bad Request",
+            "text/plain",
+            b"invalid texture path",
+        );
+    }
+    let relative = relative.strip_suffix(".png").unwrap_or(relative);
+    let mut pieces = relative.splitn(2, '/');
+    let namespace = pieces.next().unwrap_or("minecraft");
+    let name = pieces.next().unwrap_or("");
+    if name.is_empty() || name.contains('/') {
+        return write_http(
+            stream,
+            "400 Bad Request",
+            "text/plain",
+            b"invalid texture name",
+        );
+    }
+    let assets = root.join("assets");
+    let base = if assets.is_dir() {
+        assets
+    } else {
+        root.clone()
+    };
+    let file = base
+        .join(namespace)
+        .join("textures")
+        .join("block")
+        .join(format!("{name}.png"));
+    match std::fs::read(file) {
+        Ok(bytes) => write_http_with_cache(stream, "200 OK", "image/png", &bytes),
+        Err(_) => write_http(stream, "404 Not Found", "image/png", &[]),
+    }
+}
+
+fn write_http(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) -> Result<(), String> {
+    write_http_with_cache(stream, status, content_type, body)
+}
+
+fn write_http_with_cache(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) -> Result<(), String> {
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: public, max-age=3600\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .map_err(|e| e.to_string())?;
+    stream.write_all(body).map_err(|e| e.to_string())
 }
 
 fn snapshots(config: &FleetConfig) -> Value {
@@ -220,11 +302,13 @@ canvas{width:100%;height:calc(100vh - 120px);min-height:460px;background:#0b0f13
 <main><section class="panel"><div id="bots"></div><div class="toolbar"><label>Layer <input id="layer" type="number" value="64" style="width:65px"></label><button onclick="refreshWorld()">Refresh world</button></div><div class="toolbar"><input id="cmd" placeholder="status or command"><button onclick="send()">Send</button></div><pre id="log"></pre><p class="muted">Click a bot to follow it. The renderer uses loaded block state data from Horizon and never writes saves.</p></section>
 <section class="panel"><canvas id="map" width="1200" height="760"></canvas><div class="muted">Isometric spectator view · scroll/zoom is intentionally kept deterministic for headless monitoring.</div></section></main>
 <script>
-let ws,selected=null,lastState=null,lastWorld=null;const $=id=>document.getElementById(id);
+let ws,selected=null,lastState=null,lastWorld=null;const textures=new Map();const $=id=>document.getElementById(id);
 const colors={grass:'#6ba34b',dirt:'#8a5a3b',stone:'#777',cobble:'#666',wood:'#9a6b3f',log:'#76502f',planks:'#b18855',sand:'#d9c27b',glass:'#9bd7e5',water:'#3c79c9',lava:'#d85d25',leaves:'#3e7d45',ore:'#9ca6af',brick:'#98584c',obsidian:'#252039',snow:'#e8f2f7',ice:'#9fd7e8'};
 function color(state){let s=(state||'').toLowerCase();for(const [k,v] of Object.entries(colors))if(s.includes(k))return v;let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))>>>0;return `hsl(${h%360} 32% 45%)`}
+function textureUrl(state){let n=(state||'').split('[')[0];return '/textures/'+n+'.png'}
+function texture(state){let url=textureUrl(state),img=textures.get(url);if(img===undefined){img=new Image();textures.set(url,img);img.onload=draw;img.onerror=()=>{textures.set(url,null);draw()};img.src=url}return img}
 function pos(v){return v?.player?.position||[0,0,0]}
-function draw(){let c=$('map'),g=c.getContext('2d');g.clearRect(0,0,c.width,c.height);g.save();g.translate(c.width/2,c.height/2+80);let scale=12;let layer=Number($('layer').value)||64;for(const b of (lastWorld?.blocks||[])){if(b[1]!==layer)continue;let dx=b[0]-(lastWorld.from?.[0]||0),dz=b[2]-(lastWorld.from?.[2]||0);let sx=(dx-dz)*scale*.5,sy=(dx+dz)*scale*.25;g.fillStyle=color(b[3]);g.beginPath();g.moveTo(sx,sy);g.lineTo(sx+scale*.5,sy+scale*.25);g.lineTo(sx,sy+scale*.5);g.lineTo(sx-scale*.5,sy+scale*.25);g.closePath();g.fill();}
+function draw(){let c=$('map'),g=c.getContext('2d');g.clearRect(0,0,c.width,c.height);g.save();g.translate(c.width/2,c.height/2+80);let scale=12;let layer=Number($('layer').value)||64;for(const b of (lastWorld?.blocks||[])){if(b[1]!==layer)continue;let dx=b[0]-(lastWorld.from?.[0]||0),dz=b[2]-(lastWorld.from?.[2]||0);let sx=(dx-dz)*scale*.5,sy=(dx+dz)*scale*.25;let img=texture(b[3]);g.beginPath();g.moveTo(sx,sy);g.lineTo(sx+scale*.5,sy+scale*.25);g.lineTo(sx,sy+scale*.5);g.lineTo(sx-scale*.5,sy+scale*.25);g.closePath();if(img&&img.complete&&img.naturalWidth){g.save();g.clip();g.drawImage(img,sx-scale*.5,sy,scale,scale*.5);g.restore()}else{g.fillStyle=color(b[3]);g.fill();}}
 for(const [name,v] of Object.entries(lastState?.bots||{})){let p=pos(v),dx=p[0]-(lastWorld?.from?.[0]||0),dz=p[2]-(lastWorld?.from?.[2]||0);let sx=(dx-dz)*scale*.5,sy=(dx+dz)*scale*.25-(p[1]-layer)*scale*.45;g.fillStyle='#7fda9b';g.beginPath();g.arc(sx,sy,7,0,7);g.fill();g.fillStyle='#fff';g.fillText(name,sx+9,sy)}g.restore();}
 function drawBots(d){lastState=d;let a=Object.entries(d.bots||{});$('bots').innerHTML=a.map(([n,v])=>`<div class="bot ${selected===n?'selected':''}" onclick="selectBot('${n}')"><b>${n}</b> <span class="ok">${v.player?'online':'offline'}</span><br><span class="muted">${JSON.stringify(pos(v))}</span></div>`).join('');if(selected&&d.bots[selected]?.player){$('layer').value=Math.floor(pos(d.bots[selected])[1])}draw()}
 function selectBot(n){selected=n;$('selected').textContent=n;drawBots(lastState||{bots:{}});refreshWorld()}

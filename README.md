@@ -114,6 +114,8 @@ safety checks. Create a fleet file:
 
 ```toml
 bind = "127.0.0.1:8765"
+# Optional: a prepared Horizon resource root or resource-pack directory.
+textures = ".local/horizon-client/26.3"
 
 [[bots]]
 name = "Miner"
@@ -126,9 +128,11 @@ socket = ".flotilla/ctl-Builder.sock"
 
 Start it with `sextant dashboard --fleet sextant-fleet.toml`. The page shows online state and
 positions, accepts control-socket commands, and renders an isometric, layer-selectable spectator view
-of the loaded world around a selected bot through `/api/world?bot=Miner`. Block-state names are mapped
-to deterministic material colors, with unknown blocks still visible, so the view remains useful with
-custom resource packs. `/api/state` is the fleet snapshot API. `/ws` upgrades to a WebSocket: send
+of the loaded world around a selected bot through `/api/world?bot=Miner`. When `textures` is set,
+the dashboard serves matching `assets/<namespace>/textures/block/*.png` files and paints those tiles
+with the actual resource-pack image; missing or custom textures fall back to deterministic material
+colors, so the view remains useful while a pack is incomplete. `/api/state` is the fleet snapshot API.
+`/ws` upgrades to a WebSocket: send
 `{"bot":"Miner","command":"status"}` and receive the command reply followed by the latest fleet
 snapshot. Keep it on a private LAN or behind an authenticated reverse proxy before exposing it beyond
 a trusted network.
