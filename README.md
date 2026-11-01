@@ -31,6 +31,7 @@ sextant --socket ... task run outpost.toml
 sextant task status outpost.toml
 sextant swarm --state fleet.json enqueue mine-iron iron.toml --priority 10
 sextant swarm --state fleet.json claim Miner
+sextant worker --fleet sextant-fleet.toml --worker Miner --scheduler fleet.json
 sextant dashboard --fleet sextant-fleet.toml   # browser + WebSocket control plane
 sextant styles                               # the presets and their knobs
 ```
@@ -114,7 +115,10 @@ same command retries only the interrupted step; `task status` reports the durabl
 The `swarm` command manages a durable priority queue shared by workers. Jobs have expiring leases,
 renewal, retry budgets, deterministic priority ordering, and reassignment when a worker disappears:
 `enqueue`, `claim`, `renew`, `complete`, `fail`, and `list` are all safe to call from separate worker
-processes using the same JSON or TOML state file.
+processes using the same JSON or TOML state file. `worker` is the autonomous loop: it claims work for
+the named bot, renews its lease while a plan runs, persists the task checkpoint after each step, and
+returns failed attempts to the queue until their retry budget is exhausted. Add `--once` when a
+supervisor should launch one bounded claim at a time.
 
 ## Headless fleet dashboard
 

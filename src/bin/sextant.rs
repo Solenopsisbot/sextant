@@ -12,7 +12,7 @@ use sextant::bot::{self, Bot};
 use sextant::build::Blueprint;
 use sextant::planner::{Goal, Settings};
 use sextant::style::Style;
-use sextant::{dashboard, swarm, tasks};
+use sextant::{dashboard, swarm, tasks, worker};
 use std::path::PathBuf;
 use std::{collections::BTreeMap, fs};
 
@@ -118,6 +118,8 @@ enum Cmd {
     Dashboard(DashboardArgs),
     /// Queue and lease durable work across a bot swarm
     Swarm(SwarmArgs),
+    /// Run an autonomous worker that claims and executes swarm jobs
+    Worker(WorkerArgs),
 }
 
 #[derive(clap::Args)]
@@ -220,6 +222,24 @@ struct SwarmArgs {
     lease_seconds: u64,
     #[command(subcommand)]
     action: SwarmAction,
+}
+
+#[derive(clap::Args)]
+struct WorkerArgs {
+    /// Fleet file containing the bot socket entries
+    #[arg(long, default_value = "sextant-fleet.toml")]
+    fleet: PathBuf,
+    /// Bot name and scheduler worker identity
+    #[arg(long)]
+    worker: String,
+    /// Shared JSON or TOML scheduler state
+    #[arg(long, default_value = "sextant-swarm.json")]
+    scheduler: PathBuf,
+    #[arg(long, default_value_t = 120)]
+    lease_seconds: u64,
+    /// Claim at most one job, then exit
+    #[arg(long)]
+    once: bool,
 }
 
 #[derive(Subcommand)]
@@ -578,6 +598,32 @@ fn run(cli: Cli) -> Result<(), String> {
                         .map_err(|e| e.to_string())?
                 ),
             }
+            Ok(())
+        }
+        Cmd::Worker(WorkerArgs {
+            fleet,
+            worker: worker_name,
+            scheduler,
+            lease_seconds,
+            once,
+        }) => {
+            let config = dashboard::load(&fleet)?;
+            let bot = config
+                .bots
+                .iter()
+                .find(|bot| bot.name == worker_name)
+                .ok_or_else(|| {
+                    format!("worker {worker_name} is not present in {}", fleet.display())
+                })?;
+            let completed = worker::run(worker::Config {
+                worker: &worker_name,
+                bot,
+                scheduler: &scheduler,
+                lease_seconds,
+                once,
+                style: Style::casual(),
+            })?;
+            println!("worker {worker_name}: completed {completed} job(s)");
             Ok(())
         }
         Cmd::Craft(CraftArgs { recipe, times }) => {

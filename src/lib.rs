@@ -7,4 +7,5 @@ pub mod spectator;
 pub mod style;
 pub mod swarm;
 pub mod tasks;
+pub mod worker;
 pub mod world;
