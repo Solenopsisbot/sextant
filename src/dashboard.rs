@@ -3,10 +3,11 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -28,6 +29,12 @@ pub struct FleetConfig {
     /// so a browser can load the login shell before supplying the token.
     #[serde(default)]
     pub auth_token: Option<String>,
+    /// Optional file containing the current token. Reloaded for every request for rotation.
+    #[serde(default)]
+    pub auth_token_file: Option<PathBuf>,
+    /// Requests per minute per remote peer; defaults to 120.
+    #[serde(default = "default_rate_limit")]
+    pub rate_limit_per_minute: u32,
     /// Optional scheduler state file surfaced in fleet snapshots.
     #[serde(default)]
     pub scheduler: Option<PathBuf>,
@@ -35,6 +42,10 @@ pub struct FleetConfig {
 fn default_bind() -> String {
     "127.0.0.1:8765".into()
 }
+fn default_rate_limit() -> u32 {
+    120
+}
+static RATE_LIMITS: OnceLock<Mutex<HashMap<String, (std::time::Instant, u32)>>> = OnceLock::new();
 
 pub fn load(path: &std::path::Path) -> Result<FleetConfig, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -53,8 +64,12 @@ pub fn serve(config: FleetConfig) -> Result<(), String> {
         match stream {
             Ok(mut stream) => {
                 let cfg = config.clone();
+                let peer = stream
+                    .peer_addr()
+                    .map(|address| address.ip().to_string())
+                    .unwrap_or_else(|_| "unknown".into());
                 std::thread::spawn(move || {
-                    let _ = handle(&mut stream, &cfg);
+                    let _ = handle_with_peer(&mut stream, &cfg, &peer);
                 });
             }
             Err(e) => eprintln!("dashboard connection: {e}"),
@@ -63,7 +78,16 @@ pub fn serve(config: FleetConfig) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 fn handle(stream: &mut TcpStream, config: &FleetConfig) -> Result<(), String> {
+    handle_with_peer(stream, config, "test")
+}
+
+fn handle_with_peer(
+    stream: &mut TcpStream,
+    config: &FleetConfig,
+    peer: &str,
+) -> Result<(), String> {
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     let mut buf = [0u8; 64 * 1024];
     let n = stream.read(&mut buf).map_err(|e| e.to_string())?;
@@ -76,6 +100,14 @@ fn handle(stream: &mut TcpStream, config: &FleetConfig) -> Result<(), String> {
         .map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_owned()))
         .collect();
     let request_target = first.split_whitespace().nth(1).unwrap_or("/");
+    if !rate_allowed(config.rate_limit_per_minute, peer) {
+        return write_http(
+            stream,
+            "429 Too Many Requests",
+            "text/plain",
+            b"rate limit exceeded",
+        );
+    }
     let protected = request_target != "/";
     if protected && !authorized(config, request_target, &headers) {
         return write_http(
@@ -125,21 +157,41 @@ fn handle(stream: &mut TcpStream, config: &FleetConfig) -> Result<(), String> {
 }
 
 fn authorized(config: &FleetConfig, target: &str, headers: &BTreeMap<String, String>) -> bool {
-    let Some(expected) = config
-        .auth_token
-        .as_deref()
-        .filter(|token| !token.is_empty())
-    else {
+    let expected = config
+        .auth_token_file
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|token| token.trim().to_owned())
+        .or_else(|| config.auth_token.clone());
+    let Some(expected) = expected.filter(|token| !token.is_empty()) else {
         return true;
     };
     headers
         .get("x-sextant-token")
-        .is_some_and(|token| token == expected)
+        .is_some_and(|token| token == expected.as_str())
         || target
             .split("token=")
             .nth(1)
             .and_then(|value| value.split('&').next())
             .is_some_and(|token| token == expected)
+}
+
+fn rate_allowed(limit: u32, peer: &str) -> bool {
+    if limit == 0 {
+        return false;
+    }
+    let now = std::time::Instant::now();
+    let limits = RATE_LIMITS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut limits = limits.lock().expect("rate limiter lock");
+    let entry = limits.entry(peer.to_owned()).or_insert((now, 0));
+    if now.duration_since(entry.0).as_secs() >= 60 {
+        *entry = (now, 0);
+    }
+    if entry.1 >= limit {
+        return false;
+    }
+    entry.1 += 1;
+    true
 }
 
 fn texture(stream: &mut TcpStream, config: &FleetConfig, request_path: &str) -> Result<(), String> {
@@ -271,6 +323,7 @@ fn world(config: &FleetConfig, path: &str) -> String {
                 && let Some(object) = blocks.as_object_mut()
             {
                 object.insert("entities".into(), entities["entities"].clone());
+                object.insert("effects".into(), s["player"]["effects"].clone());
             }
             Ok(blocks)
         })
@@ -305,42 +358,111 @@ fn command(config: &FleetConfig, body: &str) -> String {
         .to_string()
 }
 fn websocket(stream: &mut TcpStream, config: &FleetConfig) -> Result<(), String> {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .ok();
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
     write_frame(stream, &state(config).into_bytes())?;
-    let mut frame = [0u8; 4096];
+    let mut subscribed: Option<String> = None;
+    let mut interval = Duration::from_millis(500);
+    let mut next_push = std::time::Instant::now();
     loop {
-        let n = match stream.read(&mut frame) {
-            Ok(0) => return Ok(()),
-            Ok(n) => n,
-            Err(_) => return Ok(()),
-        };
-        if n < 2 {
+        if let Some(bot) = subscribed.as_deref()
+            && std::time::Instant::now() >= next_push
+        {
+            let payload = world(config, &format!("/api/world?bot={bot}"));
+            write_frame(stream, payload.as_bytes())?;
+            next_push = std::time::Instant::now() + interval;
+        }
+        let Some((opcode, text)) = read_frame(stream)? else {
             continue;
-        }
-        let len = (frame[1] & 0x7f) as usize;
-        let mut at = 2;
-        let mask = frame[1] & 0x80 != 0;
-        let mut key = [0u8; 4];
-        if mask {
-            key.copy_from_slice(&frame[at..at + 4]);
-            at += 4;
-        }
-        let end = at + len.min(frame.len() - at);
-        let mut text = frame[at..end].to_vec();
-        if mask {
-            for (i, b) in text.iter_mut().enumerate() {
-                *b ^= key[i % 4];
+        };
+        match opcode {
+            0x8 => return Ok(()),
+            0x9 => write_control_frame(stream, 0xA, &text)?,
+            0x1 => {
+                if let Ok(req) = serde_json::from_slice::<Value>(&text) {
+                    if let Some(bot) = req["subscribe"].as_str() {
+                        if config.bots.iter().any(|entry| entry.name == bot) {
+                            subscribed = Some(bot.to_owned());
+                            interval = Duration::from_millis(
+                                req["interval_ms"]
+                                    .as_u64()
+                                    .unwrap_or(500)
+                                    .clamp(100, 10_000),
+                            );
+                            next_push = std::time::Instant::now();
+                        }
+                    } else if req["command"].is_string() {
+                        let response = command(config, &req.to_string());
+                        write_frame(stream, response.as_bytes())?;
+                    }
+                }
             }
+            _ => {}
         }
-        if let Ok(req) = serde_json::from_slice::<Value>(&text) {
-            let response = command(config, &req.to_string());
-            write_frame(stream, response.as_bytes())?;
-        }
-        write_frame(stream, state(config).as_bytes())?;
     }
 }
+
+fn read_frame(stream: &mut TcpStream) -> Result<Option<(u8, Vec<u8>)>, String> {
+    let mut header = [0u8; 2];
+    match stream.read_exact(&mut header) {
+        Ok(()) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    }
+    let opcode = header[0] & 0x0f;
+    let masked = header[1] & 0x80 != 0;
+    let marker = (header[1] & 0x7f) as usize;
+    let length = match marker {
+        n @ 0..=125 => n,
+        126 => {
+            let mut bytes = [0u8; 2];
+            stream.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+            u16::from_be_bytes(bytes) as usize
+        }
+        127 => {
+            let mut bytes = [0u8; 8];
+            stream.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+            u64::from_be_bytes(bytes)
+                .try_into()
+                .map_err(|_| "WebSocket frame too large")?
+        }
+        _ => unreachable!(),
+    };
+    if length > 512 * 1024 {
+        return Err("WebSocket frame exceeds 512 KiB".into());
+    }
+    if !masked {
+        return Err("client WebSocket frame was not masked".into());
+    }
+    let mut mask = [0u8; 4];
+    stream.read_exact(&mut mask).map_err(|e| e.to_string())?;
+    let mut payload = vec![0u8; length];
+    stream.read_exact(&mut payload).map_err(|e| e.to_string())?;
+    for (index, byte) in payload.iter_mut().enumerate() {
+        *byte ^= mask[index % 4];
+    }
+    Ok(Some((opcode, payload)))
+}
 fn write_frame(stream: &mut TcpStream, payload: &[u8]) -> Result<(), String> {
+    write_control_frame(stream, 0x1, payload)
+}
+
+fn write_control_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8]) -> Result<(), String> {
+    if payload.len() > 512 * 1024 {
+        return Err("WebSocket payload exceeds 512 KiB".into());
+    }
     let len = payload.len();
-    let mut h = vec![0x81];
+    let mut h = vec![0x80 | (opcode & 0x0f)];
     if len < 126 {
         h.push(len as u8);
     } else if len <= u16::MAX as usize {
@@ -381,13 +503,14 @@ function pos(v){return v?.player?.position||[0,0,0]}
 function project(p,layer){let dx=p[0]-(lastWorld?.from?.[0]||0),dy=p[1]-layer,dz=p[2]-(lastWorld?.from?.[2]||0),a=cam.yaw*Math.PI/180,q=cam.pitch*Math.PI/180,x=dx*Math.cos(a)-dz*Math.sin(a),depth=dx*Math.sin(a)+dz*Math.cos(a);return [x*cam.zoom,(dy*Math.cos(q)-depth*Math.sin(q))*cam.zoom]}
 function draw(){let c=$('map'),g=c.getContext('2d');g.clearRect(0,0,c.width,c.height);g.save();g.translate(c.width/2,c.height/2+80);let scale=cam.zoom;let layer=Number($('layer').value)||64;for(const b of (lastWorld?.blocks||[])){if(b[1]!==layer)continue;let [sx,sy]=project([b[0],b[1],b[2]],layer);let img=texture(b[3]);g.beginPath();g.moveTo(sx,sy);g.lineTo(sx+scale*.5,sy+scale*.25);g.lineTo(sx,sy+scale*.5);g.lineTo(sx-scale*.5,sy+scale*.25);g.closePath();if(img&&img.complete&&img.naturalWidth){g.save();g.clip();g.drawImage(img,sx-scale*.5,sy,scale,scale*.5);g.restore()}else{g.fillStyle=color(b[3]);g.fill();}}
 for(const [name,v] of Object.entries(lastState?.bots||{})){let p=pos(v),[sx,sy]=project(p,layer);g.fillStyle='#7fda9b';g.beginPath();g.arc(sx,sy,7,0,7);g.fill();g.fillStyle='#fff';g.fillText(name,sx+9,sy)}
-for(const e of (lastWorld?.entities||[])){let p=e.pos||[0,0,0];if(Math.abs(p[1]-layer)>8)continue;let [sx,sy]=project(p,layer);g.fillStyle='#f06b9a';g.beginPath();g.moveTo(sx,sy-6);g.lineTo(sx+5,sy+5);g.lineTo(sx-5,sy+5);g.closePath();g.fill();}g.restore();}
+for(const e of (lastWorld?.entities||[])){let p=e.pos||[0,0,0];if(Math.abs(p[1]-layer)>8)continue;let [sx,sy]=project(p,layer);if(e.type==='minecraft:item'){g.fillStyle=color(e.item?.item||'item');g.fillRect(sx-4,sy-4,8,8)}else if(e.type==='minecraft:experience_orb'){g.fillStyle='#70e35e';g.beginPath();g.arc(sx,sy,4,0,7);g.fill()}else{g.fillStyle='#f06b9a';g.beginPath();g.moveTo(sx,sy-6);g.lineTo(sx+5,sy+5);g.lineTo(sx-5,sy+5);g.closePath();g.fill();}}
+for(const [index,effect] of (lastWorld?.effects||[]).entries()){for(let n=0;n<4;n++){let a=(index*4+n)*1.7,px=Math.cos(a)*10,py=Math.sin(a)*6;g.fillStyle='#b57cff';g.fillRect(px,py,2,2)}}g.restore();}
 function drawBots(d){lastState=d;let a=Object.entries(d.bots||{});$('bots').innerHTML=a.map(([n,v])=>`<div class="bot ${selected===n?'selected':''}" onclick="selectBot('${n}')"><b>${n}</b> <span class="ok">${v.player?'online':'offline'}</span><br><span class="muted">${JSON.stringify(pos(v))}</span></div>`).join('');$('jobs').innerHTML=(d.jobs||[]).map(j=>`<div class="muted">${j.id}: ${j.status}${j.worker?' · '+j.worker:''}</div>`).join('');if(selected&&d.bots[selected]?.player){$('layer').value=Math.floor(pos(d.bots[selected])[1])}draw()}
-function selectBot(n){selected=n;$('selected').textContent=n;drawBots(lastState||{bots:{}});refreshWorld()}
+function selectBot(n){selected=n;$('selected').textContent=n;drawBots(lastState||{bots:{}});refreshWorld();if(ws&&ws.readyState===1)ws.send(JSON.stringify({subscribe:n,interval_ms:500}))}
 function poll(){api('/api/state').then(r=>r.json()).then(d=>{drawBots(d);$('conn').textContent='live'}).catch(()=>$('conn').textContent='offline')}
 function refreshWorld(){if(!selected)return;api('/api/world?bot='+encodeURIComponent(selected)).then(r=>r.json()).then(w=>{lastWorld=w;draw()}).catch(e=>$('log').textContent=e)}
 function send(){if(!selected)return $('log').textContent='select a bot first';let c=$('cmd').value;api('/api/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bot:selected,command:c})}).then(r=>r.text()).then(t=>{$('log').textContent=t;poll()})}
-const canvas=$('map');canvas.addEventListener('pointerdown',e=>{drag={x:e.clientX,y:e.clientY};canvas.setPointerCapture(e.pointerId)});canvas.addEventListener('pointermove',e=>{if(!drag)return;cam.yaw+=(e.clientX-drag.x)*.5;cam.pitch=Math.max(-80,Math.min(80,cam.pitch+(e.clientY-drag.y)*.5));drag={x:e.clientX,y:e.clientY};draw()});canvas.addEventListener('pointerup',()=>drag=null);canvas.addEventListener('wheel',e=>{e.preventDefault();cam.zoom=Math.max(3,Math.min(40,cam.zoom-e.deltaY*.01));draw()},{passive:false});$('layer').addEventListener('input',draw);setInterval(()=>{poll();refreshWorld()},1500);poll();try{ws=new WebSocket(`ws://${location.host}/ws${authQuery()}`);ws.onmessage=e=>{try{let d=JSON.parse(e.data);if(d.bots)drawBots(d)}catch{}}}catch{}
+const canvas=$('map');canvas.addEventListener('pointerdown',e=>{drag={x:e.clientX,y:e.clientY};canvas.setPointerCapture(e.pointerId)});canvas.addEventListener('pointermove',e=>{if(!drag)return;cam.yaw+=(e.clientX-drag.x)*.5;cam.pitch=Math.max(-80,Math.min(80,cam.pitch+(e.clientY-drag.y)*.5));drag={x:e.clientX,y:e.clientY};draw()});canvas.addEventListener('pointerup',()=>drag=null);canvas.addEventListener('wheel',e=>{e.preventDefault();cam.zoom=Math.max(3,Math.min(40,cam.zoom-e.deltaY*.01));draw()},{passive:false});function connect(){try{ws=new WebSocket(`ws://${location.host}/ws${authQuery()}`);ws.onopen=()=>{if(selected)ws.send(JSON.stringify({subscribe:selected,interval_ms:500}))};ws.onmessage=e=>{try{let d=JSON.parse(e.data);if(d.bots)drawBots(d);else if(d.blocks){lastWorld=d;draw()}}catch{}};ws.onclose=()=>setTimeout(connect,1000)}}catch{setTimeout(connect,2000)}}$('layer').addEventListener('input',draw);setInterval(()=>{poll();refreshWorld()},1500);poll();connect();
 </script>"#;
 
 #[cfg(test)]
@@ -401,6 +524,8 @@ mod tests {
             bind: "127.0.0.1:0".into(),
             textures: Some(root),
             auth_token: Some("secret".into()),
+            auth_token_file: None,
+            rate_limit_per_minute: 120,
             scheduler: None,
         }
     }
@@ -447,5 +572,21 @@ mod tests {
         client.read_to_string(&mut response).unwrap();
         server.join().unwrap();
         assert!(response.starts_with("HTTP/1.1 401 Unauthorized"));
+    }
+
+    #[test]
+    fn token_file_rotation_and_rate_limit_are_enforced() {
+        let path = std::env::temp_dir().join(format!("sextant-token-{}", std::process::id()));
+        std::fs::write(&path, "old\n").unwrap();
+        let mut cfg = config(std::env::temp_dir());
+        cfg.auth_token = None;
+        cfg.auth_token_file = Some(path.clone());
+        let old = BTreeMap::from([(String::from("x-sextant-token"), String::from("old"))]);
+        assert!(authorized(&cfg, "/api/state", &old));
+        std::fs::write(&path, "new\n").unwrap();
+        assert!(!authorized(&cfg, "/api/state", &old));
+        assert!(rate_allowed(1, "unique-rate-test"));
+        assert!(!rate_allowed(1, "unique-rate-test"));
+        let _ = std::fs::remove_file(path);
     }
 }
