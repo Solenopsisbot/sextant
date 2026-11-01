@@ -36,6 +36,9 @@ struct Cli {
     /// The hotbar item to mine with (default: whatever it holds)
     #[arg(long, global = true)]
     tool: Option<String>,
+    /// Persistent terrain cache for plan and eta commands
+    #[arg(long, global = true)]
+    cache: Option<PathBuf>,
     /// Print every step, and where the bot was when one fails
     #[arg(long, short, global = true)]
     verbose: bool,
@@ -54,6 +57,31 @@ enum Cmd {
     Plan(Target),
     /// Print the presets
     Styles,
+    /// Stop movement immediately and release every held key
+    Stop,
+    /// Pause movement by releasing keys (the current command can be resumed by starting it again)
+    Pause,
+    /// Resume is a convenience alias for reporting that a new command is required
+    Resume,
+    /// Estimate the route without printing every step
+    Eta(Target),
+    /// Print the bot's current control state
+    Status,
+    /// Mine matching blocks in nearest-first order
+    Mine(MineArgs),
+}
+
+#[derive(clap::Args)]
+struct MineArgs {
+    /// Block names, with or without the minecraft: namespace
+    #[arg(required = true)]
+    blocks: Vec<String>,
+    /// Number of blocks to mine
+    #[arg(long, short, default_value_t = 1)]
+    count: u32,
+    /// Search radius for loaded matching blocks
+    #[arg(long, default_value_t = 64)]
+    search_radius: i32,
 }
 
 /// A block position; coordinates may be negative (`go -- -120 64 -40` isn't needed).
@@ -104,6 +132,79 @@ fn run(cli: Cli) -> Result<(), String> {
             }
             Ok(())
         }
+        command @ (Cmd::Stop | Cmd::Pause | Cmd::Resume) => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            bot.cmd("release")?;
+            match command {
+                Cmd::Stop => println!("stopped"),
+                Cmd::Pause => println!("paused (keys released; rerun the command to resume)"),
+                Cmd::Resume => println!("no resumable process; start a new go command"),
+                _ => unreachable!(),
+            }
+            Ok(())
+        }
+        Cmd::Status => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            println!("{}", bot.cmd("state")?);
+            Ok(())
+        }
+        Cmd::Eta(Target { x, y, z }) => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            let me = bot.me()?;
+            let goal = Goal {
+                pos: [x, y, z],
+                radius: cli.radius,
+            };
+            let started = std::time::Instant::now();
+            let (path, read) =
+                bot.plan_loaded_cached(me.feet, goal, &settings, cli.cache.as_deref())?;
+            println!(
+                "eta {:.1} s, {} steps, {}, {} nodes, {} tiles, planned in {} ms",
+                path.cost / 20.0,
+                path.steps.len(),
+                if path.complete { "complete" } else { "partial" },
+                path.explored,
+                read,
+                started.elapsed().as_millis()
+            );
+            Ok(())
+        }
+        Cmd::Mine(MineArgs {
+            blocks,
+            count,
+            search_radius,
+        }) => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            let trip = bot::Trip {
+                settings: settings.clone(),
+                style: &style,
+                seed: cli.seed,
+                verbose: cli.verbose,
+                block: cli.block.clone(),
+                tool: cli.tool.clone(),
+            };
+            let mined = bot::mine(&mut bot, &blocks, count, search_radius, &trip, |line| {
+                eprintln!("{line}")
+            })?;
+            println!("mined {mined} block(s)");
+            Ok(())
+        }
         Cmd::Plan(Target { x, y, z }) => {
             let mut bot = Bot::connect(
                 cli.socket
@@ -116,7 +217,8 @@ fn run(cli: Cli) -> Result<(), String> {
                 radius: cli.radius,
             };
             let started = std::time::Instant::now();
-            let (path, read) = bot.plan_loaded(me.feet, goal, &settings)?;
+            let (path, read) =
+                bot.plan_loaded_cached(me.feet, goal, &settings, cli.cache.as_deref())?;
             println!(
                 "{} steps from {:?}, {}, {:.1} s of walking, {} nodes in {} ms ({read} tiles read)",
                 path.steps.len(),

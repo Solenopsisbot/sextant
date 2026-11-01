@@ -79,6 +79,18 @@ impl Bot {
         parse_me(&self.cmd("state")?)
     }
 
+    /// Finds loaded blocks of a kind, nearest first. Horizon does the scan in its world
+    /// representation, so this is much cheaper and more complete than asking Sextant to
+    /// deserialize a render-distance-sized box just to count matching blocks.
+    pub fn find_blocks(&mut self, block: &str, radius: i32) -> Result<Vec<Pos>, String> {
+        let name = if block.contains(':') {
+            block.to_owned()
+        } else {
+            format!("minecraft:{block}")
+        };
+        parse_find_blocks(&self.cmd(&format!("find-block {name} {radius}"))?)
+    }
+
     /// Plan across the current render distance, fetching only terrain the search touches.
     /// Reads stay chunk-aligned so an unloaded neighbour is never mistaken for air.
     pub fn plan_loaded(
@@ -86,6 +98,18 @@ impl Bot {
         start: Pos,
         goal: Goal,
         settings: &Settings,
+    ) -> Result<(Path, usize), String> {
+        self.plan_loaded_cached(start, goal, settings, None)
+    }
+
+    /// Like [`Self::plan_loaded`], reusing complete terrain tiles from `cache` and saving
+    /// newly-read tiles when planning finishes.
+    pub fn plan_loaded_cached(
+        &mut self,
+        start: Pos,
+        goal: Goal,
+        settings: &Settings,
+        cache: Option<&std::path::Path>,
     ) -> Result<(Path, usize), String> {
         use std::collections::{HashMap, HashSet};
         let state = self.cmd("state")?;
@@ -99,6 +123,9 @@ impl Bot {
             .unwrap_or(8) as i32;
         let centre = [start[0].div_euclid(16), start[2].div_euclid(16)];
         let mut region = Region::new();
+        if let Some(path) = cache {
+            let _ = region.load_cache(path);
+        }
         region.track_missing();
         let mut loaded = HashMap::new();
         let mut attempted = HashSet::new();
@@ -157,6 +184,9 @@ impl Bot {
                 }
                 Ok(count > before)
             })?;
+        if let Some(cache) = cache {
+            region.save_cache(cache)?;
+        }
         Ok((path, count))
     }
 
@@ -200,6 +230,24 @@ impl Bot {
         }
         Ok(cmds.len())
     }
+}
+
+fn parse_find_blocks(reply: &Value) -> Result<Vec<Pos>, String> {
+    let Some(list) = reply["nearest"].as_array() else {
+        return Err("find-block reply has no nearest list".into());
+    };
+    list.iter()
+        .map(|entry| {
+            let a = entry["pos"]
+                .as_array()
+                .ok_or("find-block result without a position")?;
+            Ok([
+                a.first().and_then(Value::as_i64).ok_or("bad x")? as i32,
+                a.get(1).and_then(Value::as_i64).ok_or("bad y")? as i32,
+                a.get(2).and_then(Value::as_i64).ok_or("bad z")? as i32,
+            ])
+        })
+        .collect()
 }
 
 /// The bot's state; an error once it has died, so no walk carries on for a dead bot.
@@ -782,6 +830,56 @@ pub fn go(bot: &mut Bot, goal: Goal, trip: &Trip, log: impl FnMut(&str)) -> Resu
     result.and(released.map(|_| ()))
 }
 
+/// Mine the nearest loaded matching blocks, one at a time. The target itself is not used as a
+/// walking destination: a player must stand beside a solid block to break it, so we path to its
+/// neighbourhood and then let Horizon's normal break action handle reach, timing and drops.
+pub fn mine(
+    bot: &mut Bot,
+    blocks: &[String],
+    count: u32,
+    radius: i32,
+    trip: &Trip,
+    mut log: impl FnMut(&str),
+) -> Result<u32, String> {
+    if blocks.is_empty() {
+        return Err("mine needs at least one block name".into());
+    }
+    let mut mined = 0;
+    let result = (|| {
+        while mined < count {
+            let me = bot.me()?;
+            let mut targets = Vec::new();
+            for block in blocks {
+                targets.extend(bot.find_blocks(block, radius)?);
+            }
+            targets.sort_by_key(|p| {
+                (p[0] - me.feet[0]).pow(2) + (p[1] - me.feet[1]).pow(2) + (p[2] - me.feet[2]).pow(2)
+            });
+            let Some(target) = targets.first().copied() else {
+                return Err(format!("no matching blocks within {radius} blocks"));
+            };
+            log(&format!("mining block at {target:?}"));
+            // A radius of 1.5 blocks reaches all faces of a normal block while allowing the
+            // planner to choose a safe side instead of trying to stand inside the target.
+            let goal = Goal {
+                pos: target,
+                radius: 1.5,
+            };
+            go(bot, goal, trip, |line| log(line))?;
+            bot.cmd(&format!(
+                "break {} {} {} --timeout 120",
+                target[0], target[1], target[2]
+            ))?;
+            mined += 1;
+        }
+        Ok(mined)
+    })();
+    match bot.cmd("release") {
+        Ok(_) => result,
+        Err(e) => Err(e),
+    }
+}
+
 fn go_inner(
     bot: &mut Bot,
     goal: Goal,
@@ -896,5 +994,22 @@ mod tests {
         assert!(parse_me(&serde_json::json!({})).is_err());
         let dead = serde_json::json!({"screen": "dead", "player": {"position": [0.0, 64.0, 0.0], "yaw": 0.0, "pitch": 0.0, "health": 0.0}});
         assert!(parse_me(&dead).unwrap_err().starts_with(DIED));
+    }
+
+    #[test]
+    fn find_block_reply_parses_nearest_positions() {
+        let reply = serde_json::json!({
+            "block": "minecraft:diamond_ore",
+            "count": 2,
+            "nearest": [
+                {"distance": 3.0, "pos": [1, 12, -4]},
+                {"distance": 8.0, "pos": [-2, 10, 9]}
+            ]
+        });
+        assert_eq!(
+            parse_find_blocks(&reply).unwrap(),
+            vec![[1, 12, -4], [-2, 10, 9]]
+        );
+        assert!(parse_find_blocks(&serde_json::json!({})).is_err());
     }
 }

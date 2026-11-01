@@ -11,6 +11,8 @@ bot of a [Flotilla](https://github.com/Solenopsisbot/flotilla) fleet.
 sextant --socket .flotilla/ctl-Miner.sock go 120 64 -40 --style player-like
 sextant --socket .flotilla/ctl-Miner.sock --build --tool iron_pickaxe go 31 101 30
 sextant --socket ... plan 120 64 -40        # print the route without moving
+sextant --socket ... mine diamond_ore --count 16
+sextant --socket ... --cache world.sxrg eta 120 64 -40
 sextant styles                               # the presets and their knobs
 ```
 
@@ -36,6 +38,9 @@ sextant styles                               # the presets and their knobs
   - a pillar first stands still on its block's centre (a jump off-centre can hit its head on a block beside it).
 - **Recovers**: a step that fails (the bot slid off its level, something moved) replans from where the bot is.
   A dead bot ends the trip with an error, and every key is let go whatever happens.
+- **Mines goals**: `mine` finds loaded matching blocks, walks to a reachable face, breaks them through
+  Horizon's normal action, and repeats for a count.
+- **Caches**: `--cache` stores complete terrain tiles in a compact versioned file for later planning.
 
 ## Styles
 

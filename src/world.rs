@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 /// A block position (x, y, z).
 pub type Pos = [i32; 3];
@@ -259,6 +260,89 @@ impl Region {
         self.missing.borrow_mut().drain().collect()
     }
 
+    /// Serialize complete terrain tiles for reuse by a later run. The format is a small,
+    /// versioned binary RLE stream; unread cells and incomplete tiles are omitted so a stale
+    /// partial read can never make the planner believe an area is air.
+    pub fn cache_bytes(&self) -> Vec<u8> {
+        let complete: Vec<_> = self
+            .tiles
+            .iter()
+            .filter(|(_, tile)| !tile.contains(&Block::Unknown))
+            .collect();
+        let mut out = Vec::new();
+        out.extend_from_slice(b"SXRG");
+        out.push(1);
+        out.extend_from_slice(&(complete.len() as u32).to_le_bytes());
+        for (key, tile) in complete {
+            for v in key {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            let mut runs = Vec::new();
+            let mut at = 0;
+            while at < tile.len() {
+                let code = encode_block(tile[at]);
+                let mut len = 1usize;
+                while at + len < tile.len()
+                    && len < u16::MAX as usize
+                    && encode_block(tile[at + len]) == code
+                {
+                    len += 1;
+                }
+                runs.push((len as u16, code));
+                at += len;
+            }
+            out.extend_from_slice(&(runs.len() as u16).to_le_bytes());
+            for (len, code) in runs {
+                out.extend_from_slice(&len.to_le_bytes());
+                out.push(code);
+            }
+        }
+        out
+    }
+
+    /// Load complete tiles from [`cache_bytes`], returning the number of tiles added.
+    pub fn load_cache_bytes(&mut self, bytes: &[u8]) -> Result<usize, String> {
+        let mut r = CacheReader { bytes, at: 0 };
+        if r.take(4)? != b"SXRG" || r.u8()? != 1 {
+            return Err("unsupported Sextant terrain cache".into());
+        }
+        let count = r.u32()? as usize;
+        if count > 1_000_000 {
+            return Err("terrain cache has too many tiles".into());
+        }
+        let mut loaded = 0;
+        for _ in 0..count {
+            let key = [r.i32()?, r.i32()?, r.i32()?];
+            let run_count = r.u16()? as usize;
+            let mut tile = vec![Block::Unknown; 8192].into_boxed_slice();
+            let mut at = 0usize;
+            for _ in 0..run_count {
+                let len = r.u16()? as usize;
+                let block = decode_block(r.u8()?);
+                if len == 0 || at + len > tile.len() {
+                    return Err("invalid terrain cache tile".into());
+                }
+                tile[at..at + len].fill(block);
+                at += len;
+            }
+            if at != tile.len() {
+                return Err("incomplete terrain cache tile".into());
+            }
+            self.tiles.insert(key, tile);
+            loaded += 1;
+        }
+        Ok(loaded)
+    }
+
+    pub fn save_cache(&self, path: impl AsRef<Path>) -> Result<(), String> {
+        std::fs::write(path, self.cache_bytes()).map_err(|e| e.to_string())
+    }
+
+    pub fn load_cache(&mut self, path: impl AsRef<Path>) -> Result<usize, String> {
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        self.load_cache_bytes(&bytes)
+    }
+
     /// A `blocks` reply: `{"from": [x,y,z], "to": [x,y,z], "blocks": [[x,y,z,"state"], ...]}`,
     /// every non-air block of the box. The box is now known: what it didn't list is air.
     pub fn add_reply(&mut self, reply: &serde_json::Value) -> Result<(), String> {
@@ -305,6 +389,77 @@ impl Region {
                     .is_some_and(|t| !t.contains(&Block::Unknown))
             })
         })
+    }
+}
+
+struct CacheReader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> CacheReader<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+        let end = self.at.checked_add(n).ok_or("terrain cache overflow")?;
+        let bytes = self
+            .bytes
+            .get(self.at..end)
+            .ok_or("truncated terrain cache")?;
+        self.at = end;
+        Ok(bytes)
+    }
+    fn u8(&mut self) -> Result<u8, String> {
+        Ok(self.take(1)?[0])
+    }
+    fn u16(&mut self) -> Result<u16, String> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
+    }
+    fn u32(&mut self) -> Result<u32, String> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn i32(&mut self) -> Result<i32, String> {
+        Ok(i32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+}
+
+fn quantize(hardness: f32) -> u8 {
+    (hardness.clamp(0.0, 15.5) * 2.0).round() as u8
+}
+
+fn encode_block(block: Block) -> u8 {
+    match block {
+        Block::Unknown => 0,
+        Block::Passable => 1,
+        Block::Sticky => 2,
+        Block::Unbreakable => 3,
+        Block::Danger => 4,
+        Block::Water => 5,
+        Block::Lava => 6,
+        Block::Climbable => 7,
+        Block::Solid { hardness, falls } => {
+            0x80 | (falls as u8 * 0x20) | (quantize(hardness) & 0x1f)
+        }
+        Block::Tall { hardness } => 0xc0 | (quantize(hardness) & 0x1f),
+    }
+}
+
+fn decode_block(code: u8) -> Block {
+    match code {
+        0 => Block::Unknown,
+        1 => Block::Passable,
+        2 => Block::Sticky,
+        3 => Block::Unbreakable,
+        4 => Block::Danger,
+        5 => Block::Water,
+        6 => Block::Lava,
+        7 => Block::Climbable,
+        c if c & 0xe0 == 0x80 || c & 0xe0 == 0xa0 => Block::Solid {
+            hardness: f32::from(c & 0x1f) / 2.0,
+            falls: c & 0x20 != 0,
+        },
+        c if c & 0xe0 == 0xc0 => Block::Tall {
+            hardness: f32::from(c & 0x1f) / 2.0,
+        },
+        _ => Block::Unknown,
     }
 }
 
@@ -384,5 +539,45 @@ mod tests {
         assert_eq!(r.get([40, 64, 5]), Block::Unknown);
         assert!(r.has_cube([10, 70, 10]));
         assert_eq!(cube_of([-1, 64, 33]), ([-32, 64, 32], [-1, 95, 63]));
+    }
+
+    #[test]
+    fn terrain_cache_round_trips_complete_tiles_compactly() {
+        let mut source = Region::new();
+        for x in 0..16 {
+            for y in 0..32 {
+                for z in 0..16 {
+                    source.set(
+                        [x, y, z],
+                        if y == 0 {
+                            Block::Solid {
+                                hardness: 1.5,
+                                falls: false,
+                            }
+                        } else {
+                            Block::Passable
+                        },
+                    );
+                }
+            }
+        }
+        let bytes = source.cache_bytes();
+        assert!(
+            bytes.len() < 200,
+            "RLE cache should stay compact: {}",
+            bytes.len()
+        );
+        let mut restored = Region::new();
+        assert_eq!(restored.load_cache_bytes(&bytes).unwrap(), 1);
+        assert!(
+            matches!(restored.get([2, 0, 2]), Block::Solid { hardness, .. } if hardness == 1.5)
+        );
+        assert_eq!(restored.get([2, 1, 2]), Block::Passable);
+    }
+
+    #[test]
+    fn terrain_cache_rejects_truncated_tiles() {
+        let mut region = Region::new();
+        assert!(region.load_cache_bytes(b"SXRG\x01\x01\x00").is_err());
     }
 }
