@@ -1,4 +1,7 @@
+use sextant::bot::Bot;
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixListener;
 use std::process::Command;
 
 fn run(args: &[&str]) -> String {
@@ -81,5 +84,39 @@ fn swarm_cli_persists_and_reassigns_work() {
     assert!(claimed.contains("Miner"));
     let listed = run(&["swarm", "--state", &path_arg, "list"]);
     assert!(listed.contains("running"));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn vehicle_and_elytra_use_primitive_horizon_commands() {
+    let path = std::env::temp_dir().join(format!(
+        "sextant-vehicle-controls-{}.sock",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).expect("bind control socket");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept control client");
+        let mut lines = BufReader::new(stream.try_clone().expect("clone control client"));
+        let replies = [
+            ("key shift tap", r#"{"ok":true}"#),
+            ("jump", r#"{"ok":true}"#),
+            ("select firework_rocket", r#"{"ok":true}"#),
+            ("use-item", r#"{"ok":true}"#),
+            ("state", r#"{"player":{"fall_flying":true}}"#),
+        ];
+        for (expected, reply) in replies {
+            let mut line = String::new();
+            lines.read_line(&mut line).expect("read control command");
+            assert_eq!(line.trim(), expected);
+            writeln!(stream, "{reply}").expect("write control reply");
+        }
+    });
+    let mut bot = Bot::connect(&path).expect("connect control socket");
+    bot.dismount().expect("dismount");
+    bot.elytra("launch").expect("launch");
+    bot.elytra("boost").expect("boost");
+    assert_eq!(bot.elytra("status").expect("status")["fall_flying"], true);
+    server.join().expect("control server thread");
     let _ = fs::remove_file(path);
 }
