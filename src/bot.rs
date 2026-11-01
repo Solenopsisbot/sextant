@@ -49,9 +49,8 @@ pub struct Entity {
     pub distance: f64,
 }
 
-/// Capabilities exposed by the current Horizon control socket.  The socket can drive ordinary
-/// movement and item use, but mounting vehicles, changing dimensions, and flight control need
-/// dedicated Horizon commands and are reported explicitly instead of being faked.
+/// Capabilities exposed by the current Horizon control socket. Vehicle and Elytra support use
+/// the same player-facing interaction, key, item-use, and state commands as a human client.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TravelCapabilities {
     pub dimension: String,
@@ -126,12 +125,21 @@ impl Bot {
     }
 
     pub fn dismount(&mut self) -> Result<Value, String> {
-        self.cmd("dismount")
+        self.cmd("key shift tap")
     }
 
     pub fn elytra(&mut self, action: &str) -> Result<Value, String> {
         match action {
-            "launch" | "boost" | "status" => self.cmd(&format!("elytra {action}")),
+            "launch" => self.cmd("jump"),
+            "boost" => self
+                .batch(&["select firework_rocket".into(), "use-item".into()])
+                .map(|mut replies| replies.pop().unwrap_or(Value::Null)),
+            "status" => {
+                let state = self.cmd("state")?;
+                Ok(serde_json::json!({
+                    "fall_flying": state["player"]["fall_flying"]
+                }))
+            }
             _ => Err("Elytra action must be launch, boost, or status".into()),
         }
     }

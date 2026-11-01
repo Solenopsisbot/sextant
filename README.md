@@ -26,6 +26,10 @@ sextant --socket ... axis east --distance 500
 sextant --socket ... find diamond_ore --search-radius 128
 sextant --socket ... portal 10 64 10
 sextant --socket ... capabilities
+sextant --socket ... mount 42
+sextant --socket ... mount --dismount
+sextant --socket ... elytra launch
+sextant --socket ... elytra boost
 sextant task validate outpost.toml
 sextant --socket ... task run outpost.toml
 sextant task status outpost.toml
@@ -72,8 +76,10 @@ sextant styles                               # the presets and their knobs
   Baritone-style movement goals; `follow` tracks nearby mobs or items.
 - **Tasks and fleets**: `pause` preserves a task for `resume`, and `--reservation` atomically claims a
   shared work-area file so multiple Flotilla bots do not take the same job.
-- **Travel**: `portal` waits for a dimension change. `capabilities` reports swimming, portal, vehicle,
-  and Elytra support exposed by the connected Horizon build.
+- **Travel**: `portal` waits for a dimension change. `mount` uses the target entity's ordinary interact,
+  `mount --dismount` taps the vanilla sneak key, and `elytra` uses jump, firework item use, and the
+  player's `fall_flying` state. `capabilities` reports swimming, portal, vehicle, and Elytra support
+  exposed by the connected Horizon build.
 
 ## Multi-step tasks
 
