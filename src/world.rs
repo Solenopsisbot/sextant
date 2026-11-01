@@ -182,7 +182,10 @@ pub fn classify(state: &str) -> Block {
     if ends("_fence") || ends("_wall") || (ends("_fence_gate") && !props.contains("open=true")) {
         return Block::Tall { hardness: 2.0 };
     }
-    if ends("_fence_gate") || (ends("_door") && props.contains("open=true")) {
+    if ends("_fence_gate")
+        || (ends("_door") && props.contains("open=true"))
+        || (ends("_trapdoor") && props.contains("open=true"))
+    {
         return Block::Passable;
     }
     let falls = matches!(
@@ -511,6 +514,14 @@ mod tests {
             classify("minecraft:oak_fence_gate[open=true]"),
             Block::Passable
         );
+        assert_eq!(
+            classify("minecraft:oak_trapdoor[open=true]"),
+            Block::Passable
+        );
+        assert!(matches!(
+            classify("minecraft:oak_trapdoor[open=false]"),
+            Block::Solid { .. }
+        ));
         assert_eq!(classify("minecraft:lava[level=0]"), Block::Lava);
         assert_eq!(classify("minecraft:bedrock"), Block::Unbreakable);
         assert_eq!(classify("minecraft:campfire[lit=true]"), Block::Danger);

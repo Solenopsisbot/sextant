@@ -89,6 +89,36 @@ impl Bot {
         parse_me(&self.cmd("state")?)
     }
 
+    /// Snapshot the inventory, including hotbar, main inventory, held stack and counts.
+    pub fn inventory(&mut self) -> Result<Value, String> {
+        self.cmd("inventory")
+    }
+
+    /// Select an item in the hotbar. Horizon accepts either a 1..9 slot or an item name.
+    pub fn select_item(&mut self, item: &str) -> Result<Value, String> {
+        self.cmd(&format!("select {item}"))
+    }
+
+    /// Count an item across the whole inventory. Names may be namespaced or bare.
+    pub fn item_count(&mut self, item: &str) -> Result<i64, String> {
+        let item = if item.contains(':') {
+            item.to_owned()
+        } else {
+            format!("minecraft:{item}")
+        };
+        Ok(self.inventory()?["counts"][&item].as_i64().unwrap_or(0))
+    }
+
+    /// Require a minimum quantity before an action. This deliberately fails with an actionable
+    /// message instead of silently attempting a placement or mining action that cannot succeed.
+    pub fn require_item(&mut self, item: &str, minimum: i64) -> Result<(), String> {
+        let count = self.item_count(item)?;
+        if count < minimum {
+            return Err(format!("need at least {minimum} of {item}, have {count}"));
+        }
+        Ok(())
+    }
+
     /// Returns nearby entities, optionally filtered by a namespaced kind such as
     /// `minecraft:pig` or `minecraft:item`.
     pub fn entities(&mut self, radius: f64, kind: Option<&str>) -> Result<Vec<Entity>, String> {
@@ -896,6 +926,10 @@ pub fn mine(
     }
     let mut mined = 0;
     let result = (|| {
+        if let Some(tool) = trip.tool.as_deref() {
+            bot.require_item(tool, 1)?;
+            bot.select_item(tool)?;
+        }
         while mined < count {
             let me = bot.me()?;
             let mut targets = Vec::new();

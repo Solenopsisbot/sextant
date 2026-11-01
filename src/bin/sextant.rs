@@ -83,6 +83,16 @@ enum Cmd {
     Follow(FollowArgs),
     /// Explore outward in a square spiral for a bounded number of legs
     Explore(ExploreArgs),
+    /// Dig a one-block-wide tunnel to X Y Z
+    Tunnel(Target),
+    /// Walk to the highest nearby grass block
+    Surface(SurfaceArgs),
+    /// Walk along an axis for a number of blocks
+    Axis(AxisArgs),
+    /// Find loaded blocks of a kind
+    Find(FindArgs),
+    /// Walk away from a target by a distance
+    Invert(InvertArgs),
 }
 
 #[derive(clap::Args)]
@@ -144,6 +154,36 @@ struct ExploreArgs {
     legs: u32,
     #[arg(long, default_value_t = 32)]
     leg_length: i32,
+}
+
+#[derive(clap::Args)]
+struct SurfaceArgs {
+    #[arg(long, default_value_t = 128)]
+    search_radius: i32,
+}
+
+#[derive(clap::Args)]
+struct AxisArgs {
+    /// north, south, east, or west
+    direction: String,
+    #[arg(default_value_t = 64)]
+    distance: i32,
+}
+
+#[derive(clap::Args)]
+struct FindArgs {
+    block: String,
+    #[arg(long, default_value_t = 64)]
+    search_radius: i32,
+}
+
+#[derive(clap::Args)]
+struct InvertArgs {
+    x: i32,
+    y: i32,
+    z: i32,
+    #[arg(default_value_t = 64)]
+    distance: i32,
 }
 
 /// A block position; coordinates may be negative (`go -- -120 64 -40` isn't needed).
@@ -336,6 +376,148 @@ fn run(cli: Cli) -> Result<(), String> {
             bot::explore(&mut bot, legs, leg_length, &trip, |line| {
                 eprintln!("{line}")
             })?;
+            Ok(())
+        }
+        Cmd::Find(FindArgs {
+            block,
+            search_radius,
+        }) => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            for pos in bot.find_blocks(&block, search_radius)? {
+                println!("{} {} {}", pos[0], pos[1], pos[2]);
+            }
+            Ok(())
+        }
+        Cmd::Surface(SurfaceArgs { search_radius }) => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            let me = bot.me()?;
+            let mut targets = bot.find_blocks("grass_block", search_radius)?;
+            targets.sort_by_key(|p| {
+                (
+                    -(p[1]),
+                    (p[0] - me.feet[0]).pow(2) + (p[2] - me.feet[2]).pow(2),
+                )
+            });
+            let target = targets.first().copied().ok_or("no surface found")?;
+            let trip = bot::Trip {
+                settings: settings.clone(),
+                style: &style,
+                seed: cli.seed,
+                verbose: cli.verbose,
+                block: cli.block.clone(),
+                tool: cli.tool.clone(),
+            };
+            bot::go(
+                &mut bot,
+                Goal {
+                    pos: [target[0], target[1] + 1, target[2]],
+                    radius: cli.radius,
+                },
+                &trip,
+                |line| eprintln!("{line}"),
+            )?;
+            Ok(())
+        }
+        Cmd::Axis(AxisArgs {
+            direction,
+            distance,
+        }) => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            let me = bot.me()?;
+            let (dx, dz) = match direction.to_ascii_lowercase().as_str() {
+                "north" | "n" => (0, -distance),
+                "south" | "s" => (0, distance),
+                "east" | "e" => (distance, 0),
+                "west" | "w" => (-distance, 0),
+                _ => return Err("axis direction must be north, south, east, or west".into()),
+            };
+            let trip = bot::Trip {
+                settings: settings.clone(),
+                style: &style,
+                seed: cli.seed,
+                verbose: cli.verbose,
+                block: cli.block.clone(),
+                tool: cli.tool.clone(),
+            };
+            bot::go(
+                &mut bot,
+                Goal {
+                    pos: [me.feet[0] + dx, me.feet[1], me.feet[2] + dz],
+                    radius: cli.radius,
+                },
+                &trip,
+                |line| eprintln!("{line}"),
+            )?;
+            Ok(())
+        }
+        Cmd::Tunnel(Target { x, y, z }) => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            let trip = bot::Trip {
+                settings: settings.clone(),
+                style: &style,
+                seed: cli.seed,
+                verbose: cli.verbose,
+                block: cli.block.clone(),
+                tool: cli.tool.clone(),
+            };
+            bot::go(
+                &mut bot,
+                Goal {
+                    pos: [x, y, z],
+                    radius: cli.radius,
+                },
+                &trip,
+                |line| eprintln!("{line}"),
+            )?;
+            Ok(())
+        }
+        Cmd::Invert(InvertArgs { x, y, z, distance }) => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            let me = bot.me()?;
+            let v = [me.feet[0] - x, me.feet[1] - y, me.feet[2] - z];
+            let len = ((v[0] * v[0] + v[2] * v[2]) as f64).sqrt().max(1.0);
+            let target = [
+                me.feet[0] + (v[0] as f64 / len * distance as f64) as i32,
+                me.feet[1],
+                me.feet[2] + (v[2] as f64 / len * distance as f64) as i32,
+            ];
+            let trip = bot::Trip {
+                settings: settings.clone(),
+                style: &style,
+                seed: cli.seed,
+                verbose: cli.verbose,
+                block: cli.block.clone(),
+                tool: cli.tool.clone(),
+            };
+            bot::go(
+                &mut bot,
+                Goal {
+                    pos: target,
+                    radius: cli.radius,
+                },
+                &trip,
+                |line| eprintln!("{line}"),
+            )?;
             Ok(())
         }
         Cmd::Waypoint(WaypointArgs { action }) => {
