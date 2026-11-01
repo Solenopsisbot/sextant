@@ -81,6 +81,8 @@ enum Cmd {
     Build(BuildArgs),
     /// Follow the nearest matching entity for a bounded number of updates
     Follow(FollowArgs),
+    /// Explore outward in a square spiral for a bounded number of legs
+    Explore(ExploreArgs),
 }
 
 #[derive(clap::Args)]
@@ -134,6 +136,14 @@ struct FollowArgs {
     stop_distance: f32,
     #[arg(long, default_value_t = 20)]
     rounds: u32,
+}
+
+#[derive(clap::Args)]
+struct ExploreArgs {
+    #[arg(long, default_value_t = 8)]
+    legs: u32,
+    #[arg(long, default_value_t = 32)]
+    leg_length: i32,
 }
 
 /// A block position; coordinates may be negative (`go -- -120 64 -40` isn't needed).
@@ -307,6 +317,25 @@ fn run(cli: Cli) -> Result<(), String> {
                 &trip,
                 |line| eprintln!("{line}"),
             )?;
+            Ok(())
+        }
+        Cmd::Explore(ExploreArgs { legs, leg_length }) => {
+            let mut bot = Bot::connect(
+                cli.socket
+                    .as_deref()
+                    .ok_or("--socket: which bot (its control socket)")?,
+            )?;
+            let trip = bot::Trip {
+                settings: settings.clone(),
+                style: &style,
+                seed: cli.seed,
+                verbose: cli.verbose,
+                block: cli.block.clone(),
+                tool: cli.tool.clone(),
+            };
+            bot::explore(&mut bot, legs, leg_length, &trip, |line| {
+                eprintln!("{line}")
+            })?;
             Ok(())
         }
         Cmd::Waypoint(WaypointArgs { action }) => {
