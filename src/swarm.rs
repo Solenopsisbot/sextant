@@ -218,6 +218,33 @@ impl Scheduler {
         Ok(result)
     }
 
+    /// Return a failed attempt to the queue while retry budget remains. Workers use this for
+    /// actionable task errors; lease expiry is handled separately by `reassign_expired`.
+    pub fn retry(
+        &mut self,
+        id: &str,
+        worker: &str,
+        error: impl Into<String>,
+    ) -> Result<Job, String> {
+        let job = self
+            .state
+            .jobs
+            .get_mut(id)
+            .ok_or_else(|| format!("unknown job {id}"))?;
+        check_owner(job, worker)?;
+        job.worker = None;
+        job.lease_until = 0;
+        job.error = Some(error.into());
+        job.status = if job.attempts < job.max_attempts {
+            Status::Queued
+        } else {
+            Status::Failed
+        };
+        let result = job.clone();
+        self.persist()?;
+        Ok(result)
+    }
+
     fn persist(&self) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
