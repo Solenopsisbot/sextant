@@ -12,6 +12,7 @@ use sextant::bot::{self, Bot};
 use sextant::build::Blueprint;
 use sextant::planner::{Goal, Settings};
 use sextant::style::Style;
+use sextant::{dashboard, tasks};
 use std::path::PathBuf;
 use std::{collections::BTreeMap, fs};
 
@@ -111,6 +112,10 @@ enum Cmd {
     Invert(InvertArgs),
     /// Harvest and replant mature crops
     Farm(FarmArgs),
+    /// Run or validate a declarative multi-step plan
+    Task(TaskArgs),
+    /// Serve the optional fleet dashboard and WebSocket control plane
+    Dashboard(DashboardArgs),
 }
 
 #[derive(clap::Args)]
@@ -164,6 +169,30 @@ struct MountArgs {
 struct ElytraArgs {
     #[arg(value_parser = ["launch", "boost", "status"])]
     action: String,
+}
+
+#[derive(clap::Args)]
+struct TaskArgs {
+    #[command(subcommand)]
+    action: TaskAction,
+}
+
+#[derive(Subcommand)]
+enum TaskAction {
+    /// Validate a plan without connecting to a bot
+    Validate { file: PathBuf },
+    /// Run all steps in order, announcing progress in game chat
+    Run { file: PathBuf },
+}
+
+#[derive(clap::Args)]
+struct DashboardArgs {
+    /// TOML fleet file containing [[bots]] name/socket entries
+    #[arg(long, default_value = "sextant-fleet.toml")]
+    fleet: PathBuf,
+    /// Override the fleet file's bind address
+    #[arg(long)]
+    bind: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -391,6 +420,41 @@ fn run(cli: Cli) -> Result<(), String> {
             )?;
             println!("{}", bot.elytra(&action)?);
             Ok(())
+        }
+        Cmd::Task(TaskArgs { action }) => match action {
+            TaskAction::Validate { file } => {
+                let plan = tasks::load(&file)?;
+                println!("valid task: {} step(s)", plan.steps.len());
+                Ok(())
+            }
+            TaskAction::Run { file } => {
+                let plan = tasks::load(&file)?;
+                let mut bot = Bot::connect(
+                    cli.socket
+                        .as_deref()
+                        .ok_or("--socket: which bot (its control socket)")?,
+                )?;
+                let trip = bot::Trip {
+                    settings: settings.clone(),
+                    style: &style,
+                    seed: cli.seed,
+                    verbose: cli.verbose,
+                    block: cli.block.clone(),
+                    tool: cli.tool.clone(),
+                };
+                tasks::run(&mut bot, &plan, &trip, |step, total, line| {
+                    eprintln!("[{step}/{total}] {line}")
+                })?;
+                println!("task complete: {} step(s)", plan.steps.len());
+                Ok(())
+            }
+        },
+        Cmd::Dashboard(DashboardArgs { fleet, bind }) => {
+            let mut config = dashboard::load(&fleet)?;
+            if let Some(bind) = bind {
+                config.bind = bind;
+            }
+            dashboard::serve(config)
         }
         Cmd::Craft(CraftArgs { recipe, times }) => {
             let mut bot = Bot::connect(

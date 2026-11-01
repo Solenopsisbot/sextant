@@ -42,6 +42,8 @@ fn help_lists_every_top_level_operation() {
         "find",
         "invert",
         "farm",
+        "task",
+        "dashboard",
     ] {
         assert!(
             help.contains(command),

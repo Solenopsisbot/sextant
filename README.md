@@ -26,6 +26,9 @@ sextant --socket ... axis east --distance 500
 sextant --socket ... find diamond_ore --search-radius 128
 sextant --socket ... portal 10 64 10
 sextant --socket ... capabilities
+sextant task validate outpost.toml
+sextant --socket ... task run outpost.toml
+sextant dashboard --fleet sextant-fleet.toml   # browser + WebSocket control plane
 sextant styles                               # the presets and their knobs
 ```
 
@@ -66,8 +69,67 @@ sextant styles                               # the presets and their knobs
 - **Tasks and fleets**: `pause` preserves a task for `resume`, and `--reservation` atomically claims a
   shared work-area file so multiple Flotilla bots do not take the same job.
 - **Travel**: `portal` waits for a dimension change. `capabilities` reports swimming, portal, vehicle,
-  and Elytra support exposed by the connected Horizon build; vehicle and flight controls require Horizon
-  commands that are not currently available.
+  and Elytra support exposed by the connected Horizon build.
+
+## Multi-step tasks
+
+Long jobs can be described once and run in order. Each step is announced in game chat with a
+`[Sextant]` prefix, printed to the terminal, and can be mirrored by the dashboard:
+
+```toml
+name = "outpost"
+
+[[steps]]
+action = "go"
+x = 120
+y = 64
+z = -40
+
+[[steps]]
+action = "mine"
+blocks = ["iron_ore", "coal_ore"]
+count = 16
+search_radius = 96
+
+[[steps]]
+action = "craft"
+recipe = "torches"
+times = 4
+
+[[steps]]
+action = "chat"
+text = "outpost supply run complete"
+```
+
+Validate it with `sextant task validate outpost.toml`, then run it with
+`sextant --socket .flotilla/ctl-Miner.sock task run outpost.toml`. Supported steps are `go`,
+`mine`, `craft`, `farm`, `chat`, `wait`, and `status`. A failed step stops the plan while completed
+steps remain visible in chat.
+
+## Headless fleet dashboard
+
+The optional dashboard keeps Horizon responsible for world truth. Sextant connects to each bot's
+existing control socket, so terminal, WebSocket, and in-game commands share the same permissions and
+safety checks. Create a fleet file:
+
+```toml
+bind = "127.0.0.1:8765"
+
+[[bots]]
+name = "Miner"
+socket = ".flotilla/ctl-Miner.sock"
+
+[[bots]]
+name = "Builder"
+socket = ".flotilla/ctl-Builder.sock"
+```
+
+Start it with `sextant dashboard --fleet sextant-fleet.toml`. The page shows online state and
+positions, accepts control-socket commands, and renders a top-down view of the loaded world around a
+selected bot through `/api/world?bot=Miner`. `/api/state` is the fleet snapshot API. `/ws` upgrades to
+a WebSocket: send `{"bot":"Miner","command":"status"}` and receive the command reply followed by
+the latest fleet snapshot. Keep it on a private LAN or behind an authenticated reverse proxy before
+exposing it beyond a trusted network.
 
 ## Styles
 
