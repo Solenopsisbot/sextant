@@ -128,6 +128,10 @@ bind = "127.0.0.1:8765"
 textures = ".local/horizon-client/26.3"
 # Optional bearer token for API, texture, and WebSocket access.
 auth_token = "change-me"
+# Or point at a file that can be atomically replaced to rotate the token without restarting.
+auth_token_file = "sextant.token"
+# Requests per minute per remote peer (default 120).
+rate_limit_per_minute = 120
 # Optional shared swarm scheduler state surfaced in the dashboard.
 scheduler = "fleet.json"
 
@@ -152,6 +156,11 @@ colors, so the view remains useful while a pack is incomplete. `/api/state` is t
 `{"bot":"Miner","command":"status"}` and receive the command reply followed by the latest fleet
 snapshot. Keep it on a private LAN or behind an authenticated reverse proxy before exposing it beyond
 a trusted network.
+
+The WebSocket accepts `{"subscribe":"Miner","interval_ms":500}` and then sends the newest world
+snapshot at the requested bounded interval. It keeps only the latest snapshot, caps frames at 512 KiB,
+answers ping frames, reconnects the browser after a dropped connection, and rejects unmasked client
+frames. A token file is reread for every HTTP/WebSocket handshake, so rotation is an atomic file replace.
 
 Drag the canvas to orbit, use the wheel to zoom, and change the Y layer to inspect vertical slices.
 Entity snapshots from Horizon are drawn as live markers and are refreshed with the loaded block view.
