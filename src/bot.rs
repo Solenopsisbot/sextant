@@ -79,6 +79,87 @@ impl Bot {
         parse_me(&self.cmd("state")?)
     }
 
+    /// Plan across the current render distance, fetching only terrain the search touches.
+    /// Reads stay chunk-aligned so an unloaded neighbour is never mistaken for air.
+    pub fn plan_loaded(
+        &mut self,
+        start: Pos,
+        goal: Goal,
+        settings: &Settings,
+    ) -> Result<(Path, usize), String> {
+        use std::collections::{HashMap, HashSet};
+        let state = self.cmd("state")?;
+        // Newer sockets expose this in state; older headless clients expose it only in
+        // status, while very old clients use the safe default below.
+        let status = self.cmd("status").unwrap_or_default();
+        let radius = status["render_distance"]
+            .as_i64()
+            .or_else(|| state["render_distance"].as_i64())
+            .filter(|n| (2..=128).contains(n))
+            .unwrap_or(8) as i32;
+        let centre = [start[0].div_euclid(16), start[2].div_euclid(16)];
+        let mut region = Region::new();
+        region.track_missing();
+        let mut loaded = HashMap::new();
+        let mut attempted = HashSet::new();
+        let mut count = 0;
+        let path =
+            planner::plan_with_loader(&mut region, start, goal, settings, |region, missing| {
+                let mut needed: Vec<_> = missing
+                    .into_iter()
+                    .filter(|p| {
+                        (MIN_Y..=MAX_Y).contains(&p[1])
+                            && (p[0].div_euclid(16) - centre[0]).abs() <= radius
+                            && (p[2].div_euclid(16) - centre[1]).abs() <= radius
+                            && !attempted.contains(p)
+                    })
+                    .collect();
+                let before = count;
+                needed.sort_unstable();
+                // Bound both queued work on the game thread and the JSON held in memory.
+                for tiles in needed.chunks(8) {
+                    let mut chunks: Vec<_> = tiles
+                        .iter()
+                        .map(|p| [p[0], p[2]])
+                        .filter(|p| !loaded.contains_key(p))
+                        .collect();
+                    chunks.sort_unstable();
+                    chunks.dedup();
+                    let cmds: Vec<_> = chunks
+                        .iter()
+                        .map(|p| format!("block {} {} {}", p[0], start[1], p[1]))
+                        .collect();
+                    for (chunk, reply) in chunks.into_iter().zip(self.batch(&cmds)?) {
+                        let present = reply["loaded"]
+                            .as_bool()
+                            .ok_or("block reply without loaded flag")?;
+                        loaded.insert(chunk, present);
+                    }
+                    let mut cmds = Vec::new();
+                    for p in tiles {
+                        attempted.insert(*p);
+                        if loaded.get(&[p[0], p[2]]) == Some(&true) {
+                            cmds.push(format!(
+                                "blocks {} {} {} {} {} {}",
+                                p[0],
+                                p[1],
+                                p[2],
+                                p[0] + 15,
+                                p[1] + 31,
+                                p[2] + 15
+                            ));
+                        }
+                    }
+                    count += cmds.len();
+                    for reply in self.batch(&cmds)? {
+                        region.add_reply(&reply)?;
+                    }
+                }
+                Ok(count > before)
+            })?;
+        Ok((path, count))
+    }
+
     /// Reads every 32-block cube within `radius` blocks (horizontally) of `centre` that the
     /// region doesn't have yet, 32 blocks above and below its height. The reads go out as one
     /// batch, answered within a frame or two rather than a frame each.
@@ -708,21 +789,17 @@ fn go_inner(
     mut log: impl FnMut(&str),
 ) -> Result<(), String> {
     let (settings, style) = (&trip.settings, trip.style);
-    let mut region = Region::new();
     let mut walker_seed = trip.seed;
-    let mut stuck_at: Option<Pos> = None;
     for attempt in 0..64 {
         let me = bot.me()?;
-        let toward = [
-            me.feet[0] + (goal.pos[0] - me.feet[0]).clamp(-48, 48),
-            me.feet[1],
-            me.feet[2] + (goal.pos[2] - me.feet[2]).clamp(-48, 48),
-        ];
-        let read = bot.load_around(&mut region, me.feet, 40)?
-            + bot.load_around(&mut region, toward, 40)?;
-        let path = planner::plan(&region, me.feet, goal, settings);
+        let started = std::time::Instant::now();
+        let (path, read) = bot.plan_loaded(me.feet, goal, settings)?;
         log(&format!(
-            "segment {attempt}: from {:?}, {} steps, {} ({} nodes, {read} cubes read)",
+            "read and planned in {} ms",
+            started.elapsed().as_millis()
+        ));
+        log(&format!(
+            "segment {attempt}: from {:?}, {} steps, {} ({} nodes, {read} tiles read)",
             me.feet,
             path.steps.len(),
             if path.complete {
@@ -763,13 +840,8 @@ fn go_inner(
             }
             Err(e) => {
                 log(&format!("replanning: {e}"));
-                // Stuck twice where it stands: what it walked into may have changed, read it
-                // again. Otherwise the world it has is still good.
-                let here = bot.me()?.feet;
-                if stuck_at == Some(here) {
-                    region = Region::new();
-                }
-                stuck_at = Some(here);
+                // Each plan takes a fresh snapshot so mining, placement and streaming
+                // changes cannot leave stale air or floors in the next route.
             }
         }
     }

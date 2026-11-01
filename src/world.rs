@@ -5,7 +5,8 @@
 //! know is a plain solid, full block, which is the safe guess for walking. A position nobody
 //! has read is [`Block::Unknown`], which the planner never walks into.
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 
 /// A block position (x, y, z).
 pub type Pos = [i32; 3];
@@ -222,9 +223,9 @@ fn hardness(name: &str) -> f32 {
 /// Blocks read from a game, by position. What isn't here is [`Block::Unknown`].
 #[derive(Default)]
 pub struct Region {
-    blocks: HashMap<Pos, Block>,
-    /// Boxes read whole: inside them, a missing position is air.
-    boxes: Vec<(Pos, Pos)>,
+    tiles: HashMap<Pos, Box<[Block]>>,
+    missing: RefCell<HashSet<Pos>>,
+    track: bool,
 }
 
 impl Region {
@@ -234,19 +235,28 @@ impl Region {
 
     /// The block at `p`.
     pub fn get(&self, p: Pos) -> Block {
-        if let Some(b) = self.blocks.get(&p) {
-            return *b;
+        let (key, index) = tile_index(p);
+        let block = self.tiles.get(&key).map_or(Block::Unknown, |t| t[index]);
+        if self.track && block == Block::Unknown {
+            self.missing.borrow_mut().insert(key);
         }
-        let inside = |(lo, hi): &(Pos, Pos)| (0..3).all(|i| lo[i] <= p[i] && p[i] <= hi[i]);
-        if self.boxes.iter().any(inside) {
-            Block::Passable
-        } else {
-            Block::Unknown
-        }
+        block
     }
 
     pub fn set(&mut self, p: Pos, b: Block) {
-        self.blocks.insert(p, b);
+        let (key, index) = tile_index(p);
+        self.tiles
+            .entry(key)
+            .or_insert_with(|| vec![Block::Unknown; 8192].into_boxed_slice())[index] = b;
+    }
+
+    pub fn track_missing(&mut self) {
+        self.track = true;
+        self.missing.borrow_mut().clear();
+    }
+
+    pub fn take_missing(&self) -> Vec<Pos> {
+        self.missing.borrow_mut().drain().collect()
     }
 
     /// A `blocks` reply: `{"from": [x,y,z], "to": [x,y,z], "blocks": [[x,y,z,"state"], ...]}`,
@@ -262,6 +272,15 @@ impl Region {
         };
         let lo = pos(&reply["from"]).ok_or("blocks reply without from")?;
         let hi = pos(&reply["to"]).ok_or("blocks reply without to")?;
+        // Replace the whole read, including blocks that have since become air.
+        for y in lo[1]..=hi[1] {
+            for z in lo[2]..=hi[2] {
+                for x in lo[0]..=hi[0] {
+                    self.set([x, y, z], Block::Passable);
+                }
+            }
+        }
+        let mut palette = HashMap::new();
         for b in reply["blocks"]
             .as_array()
             .ok_or("blocks reply without blocks")?
@@ -271,17 +290,35 @@ impl Region {
                 .get(3)
                 .and_then(|s| s.as_str())
                 .ok_or("block entry without a state")?;
-            self.blocks.insert(p, classify(state));
+            self.set(p, *palette.entry(state).or_insert_with(|| classify(state)));
         }
-        self.boxes.push((lo, hi));
         Ok(())
     }
 
     /// Whether the 32-block cube that holds `p` has been read (see [`cube_of`]).
     pub fn has_cube(&self, p: Pos) -> bool {
         let (lo, hi) = cube_of(p);
-        self.boxes.iter().any(|(a, b)| *a == lo && *b == hi)
+        (lo[0]..=hi[0]).step_by(16).all(|x| {
+            (lo[2]..=hi[2]).step_by(16).all(|z| {
+                self.tiles
+                    .get(&[x, lo[1], z])
+                    .is_some_and(|t| !t.contains(&Block::Unknown))
+            })
+        })
     }
+}
+
+/// Socket read tiles: one chunk wide, 32 blocks high.
+pub fn tile_index(p: Pos) -> (Pos, usize) {
+    let key = [
+        p[0].div_euclid(16) * 16,
+        p[1].div_euclid(32) * 32,
+        p[2].div_euclid(16) * 16,
+    ];
+    (
+        key,
+        ((p[1] - key[1]) * 256 + (p[2] - key[2]) * 16 + p[0] - key[0]) as usize,
+    )
 }
 
 /// The 32x32x32 cube (aligned to multiples of 32) that holds `p`: the unit regions are read

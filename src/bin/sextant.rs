@@ -8,9 +8,8 @@
 
 use clap::{Parser, Subcommand};
 use sextant::bot::{self, Bot};
-use sextant::planner::{self, Goal, Settings};
+use sextant::planner::{Goal, Settings};
 use sextant::style::Style;
-use sextant::world::Region;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -112,16 +111,14 @@ fn run(cli: Cli) -> Result<(), String> {
                     .ok_or("--socket: which bot (its control socket)")?,
             )?;
             let me = bot.me()?;
-            let mut region = Region::new();
-            let read = bot.load_around(&mut region, me.feet, 48)?;
             let goal = Goal {
                 pos: [x, y, z],
                 radius: cli.radius,
             };
             let started = std::time::Instant::now();
-            let path = planner::plan(&region, me.feet, goal, &settings);
+            let (path, read) = bot.plan_loaded(me.feet, goal, &settings)?;
             println!(
-                "{} steps from {:?}, {}, {:.1} s of walking, {} nodes in {} ms ({read} cubes read)",
+                "{} steps from {:?}, {}, {:.1} s of walking, {} nodes in {} ms ({read} tiles read)",
                 path.steps.len(),
                 me.feet,
                 if path.complete { "complete" } else { "partial" },

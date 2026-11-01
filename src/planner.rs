@@ -357,7 +357,41 @@ impl PartialOrd for Open {
 /// `settings.node_budget`.
 pub fn plan(world: &Region, start: Pos, goal: Goal, settings: &Settings) -> Path {
     let mover = Mover { world, s: settings };
-    let per_block = mover.per_block();
+    search(start, goal, settings, |p, placed, steps| {
+        mover.steps(p, placed, steps);
+        Ok(())
+    })
+    .expect("in-memory planning cannot fail")
+}
+
+/// Resume the same A* search as missing terrain is fetched, without restarting it.
+pub fn plan_with_loader(
+    world: &mut Region,
+    start: Pos,
+    goal: Goal,
+    settings: &Settings,
+    mut load: impl FnMut(&mut Region, Vec<Pos>) -> Result<bool, String>,
+) -> Result<Path, String> {
+    world.track_missing();
+    search(start, goal, settings, |p, placed, steps| {
+        loop {
+            steps.clear();
+            Mover { world, s: settings }.steps(p, placed, steps);
+            let missing = world.take_missing();
+            if !load(world, missing)? {
+                return Ok(());
+            }
+        }
+    })
+}
+
+fn search(
+    start: Pos,
+    goal: Goal,
+    settings: &Settings,
+    mut expand: impl FnMut(Pos, bool, &mut Vec<(Step, f32)>) -> Result<(), String>,
+) -> Result<Path, String> {
+    let per_block = if settings.sprint { SPRINT } else { WALK };
     let mut open = BinaryHeap::new();
     let mut best_g: HashMap<Pos, f32> = HashMap::new();
     let mut came: HashMap<Pos, (Pos, Step)> = HashMap::new();
@@ -392,13 +426,15 @@ pub fn plan(world: &Region, start: Pos, goal: Goal, settings: &Settings) -> Path
         let placed_floor = came
             .get(&p)
             .is_some_and(|(_, s)| s.place == Some(add(p, [0, -1, 0])));
-        mover.steps(p, placed_floor, &mut steps);
+        expand(p, placed_floor, &mut steps)?;
         for (step, cost) in steps.drain(..) {
             let ng = g + cost;
             if ng < best_g.get(&step.to).copied().unwrap_or(f32::INFINITY) {
                 best_g.insert(step.to, ng);
                 open.push(Open {
-                    f: ng + heuristic(step.to, &goal, per_block),
+                    // A small greedy bias keeps long-range searches responsive while still
+                    // preferring routes whose movement cost is close to optimal.
+                    f: ng + heuristic(step.to, &goal, per_block) * 2.0,
                     g: ng,
                     p: step.to,
                 });
@@ -417,12 +453,12 @@ pub fn plan(world: &Region, start: Pos, goal: Goal, settings: &Settings) -> Path
         at = *from;
     }
     route.reverse();
-    Path {
+    Ok(Path {
         steps: route,
         complete: reached.is_some(),
         cost: best_g.get(&end).copied().unwrap_or(0.0),
         explored,
-    }
+    })
 }
 
 #[cfg(test)]

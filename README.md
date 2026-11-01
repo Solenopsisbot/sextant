@@ -23,7 +23,9 @@ sextant styles                               # the presets and their knobs
   breaking `hardness x 30 / tool speed`). Lava, fire and other hazards are never walked through; a block under a
   falling block or beside a liquid isn't mined. A route beyond what it has read ends at the best partial route,
   so long trips go in segments.
-- **Reads** the world over the socket in 32-block cubes, all of a read in one batch.
+- **Reads** the world lazily across the bot's full render distance. A* asks for only the chunk tiles
+  touched by its frontier, then continues the same search as replies arrive; it does not preload a
+  small bubble or restart from scratch at every boundary.
 - **Walks** a plan:
   - runs of walking are followed by pure pursuit along the line through the blocks' centres, so drift is
     corrected and corners are cut only inside their own block;
