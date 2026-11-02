@@ -8,6 +8,9 @@ Examples:
 
 ```text
 /sextant go 120 64 -40
+/sextant mine diamond_ore 16 64
+/sextant explore 12 64
+/sextant follow minecraft:pig 20
 /sextant stop
 /sextant jump
 /sextant break 120 64 -40
