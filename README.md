@@ -52,8 +52,10 @@ horizon-launcher native-build native/sextant \
 ```
 
 Launch the **Native mods** Ladybug instance from the launcher. In a world, use `/sextant help`,
-`/sextant go X Y Z`, `/sextant stop`, `/sextant jump`, `/sextant break X Y Z`, and
-`/sextant place X Y Z --item cobblestone`. The bundle is pinned to the Horizon revision in its
+`/sextant go X Y Z`, `/sextant mine BLOCK [COUNT] [RADIUS]`, `/sextant explore LEGS LENGTH`,
+`/sextant follow [KIND] [ROUNDS]`, `/sextant stop`, `/sextant jump`, `/sextant break X Y Z`, and
+`/sextant place X Y Z --item cobblestone`. Mine jobs find loaded blocks, path to them, break them,
+and continue across ticks; explore and follow jobs chain the same pathing task repeatedly. The bundle is pinned to the Horizon revision in its
 `horizon-mixin.toml`; rebuild it when switching the instance to a different incompatible revision.
 
 ## What it does
