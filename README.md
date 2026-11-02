@@ -40,6 +40,26 @@ sextant dashboard --fleet sextant-fleet.toml   # browser + WebSocket control pla
 sextant styles                               # the presets and their knobs
 ```
 
+## Horizon client mod
+
+For an in-game Baritone-style experience, the repository also contains a Horizon native client
+bundle under `native/sextant`. It adds `/sextant` to the client and runs through Horizon's own
+pathfinder and input loop, so it does not need a separate control socket or a server-side install.
+
+From a Sextant checkout on the Ladybug machine, install it into the Ladybug instance with Horizon's
+launcher:
+
+```sh
+horizon-launcher native-build native/sextant \
+  --instance Ladybug \
+  --trust-native-code
+```
+
+Launch the **Native mods** Ladybug instance from the launcher. In a world, use `/sextant help`,
+`/sextant go X Y Z`, `/sextant stop`, `/sextant jump`, `/sextant break X Y Z`, and
+`/sextant place X Y Z --item cobblestone`. The bundle is pinned to the Horizon revision in its
+`horizon-mixin.toml`; rebuild it when switching the instance to a different incompatible revision.
+
 ## What it does
 
 - **Plans** with A* over the moves a player on foot makes: walking, diagonals (only where both corners are open
