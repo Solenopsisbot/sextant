@@ -1,0 +1,24 @@
+[mod]
+id = "sextant"
+version = "0.1.0"
+priority = 100
+
+[compatibility]
+horizon_revision = "3bc251ea5af23d1ea4e800e722a6617630f098af"
+
+[[module]]
+id = "runtime"
+file = "crates/horizon-client/src/game.rs"
+name = "sextant"
+source = "runtime.rs"
+
+[[injection]]
+id = "chat-command"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_command"
+helper = "command.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "self" },
+  { name = "command", ty = "&str", value = "command" },
+  { name = "ran", ty = "&mut bool", value = "ran" },
+]
