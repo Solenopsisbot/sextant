@@ -13,6 +13,11 @@ Examples:
 /sextant follow minecraft:pig 20
 /sextant craft planks
 /sextant craft sticks
+/sextant farm wheat 16
+/sextant mount 42
+/sextant mount --dismount
+/sextant elytra launch
+/sextant elytra boost
 /sextant stop
 /sextant jump
 /sextant break 120 64 -40
