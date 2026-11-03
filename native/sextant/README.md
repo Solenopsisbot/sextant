@@ -26,6 +26,9 @@ Examples:
 /sextant place 120 64 -40 --item cobblestone
 ```
 
+The Horizon Options > Mods page lists Sextant and exposes **Clear active job** for recovering a
+stalled sequence without restarting the client.
+
 Build and install it from the Sextant checkout with:
 
 ```sh

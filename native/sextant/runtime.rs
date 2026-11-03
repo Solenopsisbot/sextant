@@ -223,3 +223,25 @@ pub(super) fn command(game: &mut Game<'_>, line: &str, ran: &mut bool) {
 }
 
 pub(super) fn tick(game: &mut Game<'_>) { poll(game); }
+
+pub(super) fn register_mod(mods: &mut Vec<super::native_hooks::NativeMod>) {
+    mods.push(super::native_hooks::NativeMod {
+        id: "sextant".into(),
+        title: "Sextant 0.1.0".into(),
+        description: "Baritone-style in-game navigation, jobs, farming, and building".into(),
+        keys: Vec::new(),
+    });
+}
+
+pub(super) fn register_settings(mod_id: &str, buttons: &mut Vec<String>) {
+    if mod_id == "sextant" {
+        buttons.push("Clear active job".into());
+    }
+}
+
+pub(super) fn settings_click(mod_id: &str, button: usize) {
+    if mod_id == "sextant" && button == 0 {
+        JOB.with(|slot| *slot.borrow_mut() = None);
+        log::info!("Sextant: cleared active job");
+    }
+}
