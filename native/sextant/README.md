@@ -14,6 +14,9 @@ Examples:
 /sextant craft planks
 /sextant craft sticks
 /sextant farm wheat 16
+/sextant build 120 64 -40 cobblestone
+/sextant task go 120 64 -40
+/sextant portal 10 64 10
 /sextant mount 42
 /sextant mount --dismount
 /sextant elytra launch
@@ -23,6 +26,9 @@ Examples:
 /sextant break 120 64 -40
 /sextant place 120 64 -40 --item cobblestone
 ```
+
+The Horizon Options > Mods page lists Sextant and exposes **Clear active job** for recovering a
+stalled sequence without restarting the client.
 
 Build and install it from the Sextant checkout with:
 

@@ -156,8 +156,8 @@ fn mapped(words: &[&str]) -> Option<Vec<String>> {
     Some(out)
 }
 
-pub(super) fn command(game: &mut Game<'_>, command: &str, ran: &mut bool) {
-    let words = command.split_whitespace().collect::<Vec<_>>();
+pub(super) fn command(game: &mut Game<'_>, line: &str, ran: &mut bool) {
+    let words = line.split_whitespace().collect::<Vec<_>>();
     let Some(words) = mapped(&words) else { return };
     *ran = true;
     if words.is_empty() { return }
@@ -205,8 +205,73 @@ pub(super) fn command(game: &mut Game<'_>, command: &str, ran: &mut bool) {
                 next_phase(game);
             }
         }
+        "build" if words.len() >= 5 => {
+            let commands = vec![
+                vec!["select".into(), words[4].clone()],
+                vec!["goto".into(), words[1].clone(), words[2].clone(), words[3].clone(), "--near".into(), "2".into(), "--timeout".into(), "120".into()],
+                vec!["place".into(), words[1].clone(), words[2].clone(), words[3].clone(), "--item".into(), words[4].clone()],
+            ];
+            JOB.with(|slot| *slot.borrow_mut() = Some(Job::Sequence { commands, index: 0, reply: None }));
+            next_phase(game);
+        }
+        "portal" if words.len() >= 4 => {
+            let commands = vec![
+                vec!["goto".into(), words[1].clone(), words[2].clone(), words[3].clone(), "--near".into(), "1".into(), "--timeout".into(), "120".into()],
+                vec!["wait".into(), "200".into()],
+            ];
+            JOB.with(|slot| *slot.borrow_mut() = Some(Job::Sequence { commands, index: 0, reply: None }));
+            next_phase(game);
+        }
+        "task" if words.len() >= 2 => {
+            let nested = words[1..].join(" ");
+            let nested_line = format!("sextant {nested}");
+            command(game, &nested_line, ran);
+        }
         _ => { let refs = words.iter().map(String::as_str).collect::<Vec<_>>(); let line = refs.join(" "); let (sender, _) = channel(); match game.agent_command(&refs, &line, &sender, &NoopEventLoop) { Ok(Handled::No) => *ran = false, Ok(_) => log::info!("Sextant: running {}", refs[0]), Err(error) => log::warn!("Sextant: {error}") } }
     }
 }
 
 pub(super) fn tick(game: &mut Game<'_>) { poll(game); }
+
+pub(super) fn register_mod(mods: &mut Vec<super::native_hooks::NativeMod>) {
+    mods.push(super::native_hooks::NativeMod {
+        id: "sextant".into(),
+        title: "Sextant 0.1.0".into(),
+        description: "Baritone-style in-game navigation, jobs, farming, and building".into(),
+        keys: Vec::new(),
+    });
+}
+
+pub(super) fn register_settings(mod_id: &str, buttons: &mut Vec<String>) {
+    if mod_id == "sextant" {
+        buttons.push("Clear active job".into());
+    }
+}
+
+pub(super) fn settings_click(mod_id: &str, button: usize) {
+    if mod_id == "sextant" && button == 0 {
+        JOB.with(|slot| *slot.borrow_mut() = None);
+        log::info!("Sextant: cleared active job");
+    }
+}
+
+pub(super) fn draw_hud(
+    game: &mut Game<'_>,
+    batch: &mut horizon_client::hud::HudBatch,
+    corners: &mut horizon_client::extras_hud::Corners,
+) {
+    let label = JOB.with(|slot| {
+        let slot = slot.borrow();
+        slot.as_ref().map(|job| match job {
+            Job::Mine { .. } => "Sextant: mining",
+            Job::Explore { .. } => "Sextant: exploring",
+            Job::Follow { .. } => "Sextant: following",
+            Job::Sequence { .. } => "Sextant: running task",
+            Job::Farm { .. } => "Sextant: farming",
+        })
+    });
+    let Some(label) = label else { return };
+    let (x, y) = corners.place(horizon_client::extras::Corner::TopLeft, 180.0, 18.0);
+    game.native_fill(batch, [x, y, 180.0, 18.0], 0x90000000);
+    game.native_text(batch, label, [x + 5.0, y + 5.0], 0xFFFFFF00, true);
+}

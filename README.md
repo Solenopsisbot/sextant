@@ -58,7 +58,9 @@ horizon-launcher native-build native/sextant \
 Launch the **Native mods** Ladybug instance from the launcher. In a world, use `/sextant help`,
 `/sextant go X Y Z`, `/sextant mine BLOCK [COUNT] [RADIUS]`, `/sextant explore LEGS LENGTH`,
 `/sextant follow [KIND] [ROUNDS]`, `/sextant craft planks`, `/sextant craft sticks`, `/sextant stop`, `/sextant jump`, `/sextant break X Y Z`, and
-`/sextant place X Y Z --item cobblestone`, `/sextant farm wheat 16`, `/sextant mount ENTITY_ID`,
+`/sextant place X Y Z --item cobblestone`, `/sextant build X Y Z BLOCK`, `/sextant task go X Y Z`,
+`/sextant portal X Y Z`,
+`/sextant farm wheat 16`, `/sextant mount ENTITY_ID`,
 `/sextant mount --dismount`, and `/sextant elytra launch|boost`. Mine jobs find loaded blocks, path to them,
 break them, and continue across ticks; explore, follow, and farm jobs chain the same pathing task repeatedly.
 The bundle is pinned to the Horizon revision in its
