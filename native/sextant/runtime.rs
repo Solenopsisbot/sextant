@@ -207,8 +207,17 @@ pub(super) fn command(game: &mut Game<'_>, line: &str, ran: &mut bool) {
         }
         "build" if words.len() >= 5 => {
             let commands = vec![
+                vec!["select".into(), words[4].clone()],
                 vec!["goto".into(), words[1].clone(), words[2].clone(), words[3].clone(), "--near".into(), "2".into(), "--timeout".into(), "120".into()],
                 vec!["place".into(), words[1].clone(), words[2].clone(), words[3].clone(), "--item".into(), words[4].clone()],
+            ];
+            JOB.with(|slot| *slot.borrow_mut() = Some(Job::Sequence { commands, index: 0, reply: None }));
+            next_phase(game);
+        }
+        "portal" if words.len() >= 4 => {
+            let commands = vec![
+                vec!["goto".into(), words[1].clone(), words[2].clone(), words[3].clone(), "--near".into(), "1".into(), "--timeout".into(), "120".into()],
+                vec!["wait".into(), "200".into()],
             ];
             JOB.with(|slot| *slot.borrow_mut() = Some(Job::Sequence { commands, index: 0, reply: None }));
             next_phase(game);
