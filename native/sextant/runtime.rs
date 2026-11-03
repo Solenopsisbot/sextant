@@ -254,3 +254,24 @@ pub(super) fn settings_click(mod_id: &str, button: usize) {
         log::info!("Sextant: cleared active job");
     }
 }
+
+pub(super) fn draw_hud(
+    game: &mut Game<'_>,
+    batch: &mut horizon_client::hud::HudBatch,
+    corners: &mut horizon_client::extras_hud::Corners,
+) {
+    let label = JOB.with(|slot| {
+        let slot = slot.borrow();
+        slot.as_ref().map(|job| match job {
+            Job::Mine { .. } => "Sextant: mining",
+            Job::Explore { .. } => "Sextant: exploring",
+            Job::Follow { .. } => "Sextant: following",
+            Job::Sequence { .. } => "Sextant: running task",
+            Job::Farm { .. } => "Sextant: farming",
+        })
+    });
+    let Some(label) = label else { return };
+    let (x, y) = corners.place(horizon_client::extras::Corner::TopLeft, 180.0, 18.0);
+    game.native_fill(batch, [x, y, 180.0, 18.0], 0x90000000);
+    game.native_text(batch, label, [x + 5.0, y + 5.0], 0xFFFFFF00, true);
+}
