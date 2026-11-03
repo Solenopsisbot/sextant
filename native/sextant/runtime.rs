@@ -13,12 +13,14 @@ impl EventLoopCtl for NoopEventLoop {
 }
 
 #[derive(Clone, Copy)]
-enum Phase { Find, Entities, Goto([i32; 3]), Break([i32; 3]) }
+enum Phase { Find, Entities, Goto([i32; 3]), Break([i32; 3]), Place([i32; 3]) }
 
 enum Job {
     Mine { block: String, left: u32, radius: i32, phase: Phase, reply: Option<Receiver<String>> },
     Explore { origin: [f64; 3], leg: u32, legs: u32, length: i32, reply: Option<Receiver<String>> },
     Follow { kind: Option<String>, left: u32, phase: Phase, reply: Option<Receiver<String>> },
+    Sequence { commands: Vec<Vec<String>>, index: usize, reply: Option<Receiver<String>> },
+    Farm { crop: String, seed: String, left: u32, radius: i32, phase: Phase, reply: Option<Receiver<String>> },
 }
 
 thread_local! { static JOB: RefCell<Option<Job>> = const { RefCell::new(None) }; }
@@ -75,6 +77,16 @@ fn next_phase(game: &mut Game<'_>) {
                 *reply = goto(game, target);
             }
             Job::Follow { kind, phase, reply, .. } => *reply = match phase { Phase::Entities => entities(game, kind.as_deref()), Phase::Goto(p) => goto(game, *p), _ => None },
+            Job::Sequence { commands, index, reply } => *reply = commands.get(*index).and_then(|command| issue(game, command)),
+            Job::Farm { crop, seed, radius, phase, reply, .. } => {
+                *reply = match phase {
+                    Phase::Find => find(game, crop, *radius),
+                    Phase::Goto(p) => goto(game, *p),
+                    Phase::Break(p) => break_block(game, *p),
+                    Phase::Place(p) => issue(game, &vec!["place".into(), p[0].to_string(), p[1].to_string(), p[2].to_string(), "--item".into(), seed.clone()]),
+                    _ => None,
+                };
+            }
         }
     });
 }
@@ -87,6 +99,8 @@ fn finish(game: &mut Game<'_>, completed: bool) {
             Job::Mine { left, phase, .. } => if !completed || *left <= 1 { *slot = None } else { *left -= 1; *phase = Phase::Find; drop(slot); next_phase(game) },
             Job::Explore { leg, legs, .. } => if !completed || *leg + 1 >= *legs { *slot = None } else { *leg += 1; drop(slot); next_phase(game) },
             Job::Follow { left, phase, .. } => if !completed || *left <= 1 { *slot = None } else { *left -= 1; *phase = Phase::Entities; drop(slot); next_phase(game) },
+            Job::Sequence { commands, index, .. } => if !completed || *index + 1 >= commands.len() { *slot = None } else { *index += 1; drop(slot); next_phase(game) },
+            Job::Farm { left, phase, .. } => if !completed || *left <= 1 { *slot = None } else { *left -= 1; *phase = Phase::Find; drop(slot); next_phase(game) },
         }
     });
 }
@@ -95,10 +109,10 @@ fn poll(game: &mut Game<'_>) {
     let result = JOB.with(|slot| {
         let mut slot = slot.borrow_mut();
         let job = slot.as_mut()?;
-        let receiver = match job { Job::Mine { reply, .. } | Job::Explore { reply, .. } | Job::Follow { reply, .. } => reply.take() }?;
+        let receiver = match job { Job::Mine { reply, .. } | Job::Explore { reply, .. } | Job::Follow { reply, .. } | Job::Sequence { reply, .. } | Job::Farm { reply, .. } => reply.take() }?;
         match receiver.try_recv() {
             Ok(text) => Some((text, true)),
-            Err(TryRecvError::Empty) => { match job { Job::Mine { reply, .. } | Job::Explore { reply, .. } | Job::Follow { reply, .. } => *reply = Some(receiver) }; None }
+            Err(TryRecvError::Empty) => { match job { Job::Mine { reply, .. } | Job::Explore { reply, .. } | Job::Follow { reply, .. } | Job::Sequence { reply, .. } | Job::Farm { reply, .. } => *reply = Some(receiver) }; None }
             Err(TryRecvError::Disconnected) => Some((String::new(), false)),
         }
     });
@@ -121,6 +135,14 @@ fn poll(game: &mut Game<'_>) {
                 Phase::Goto(_) => { drop(slot); finish(game, true) },
                 _ => {},
             },
+            Job::Sequence { .. } => { drop(slot); finish(game, true) },
+            Job::Farm { seed, phase, reply, .. } => match phase {
+                Phase::Find => if let Some(p) = value["nearest"].as_array().and_then(|v| v.first()).and_then(|v| position(v, "pos")) { *phase = Phase::Goto(p); *reply = goto(game, p) } else { *slot = None },
+                Phase::Goto(p) => { let target = *p; *phase = Phase::Break(target); *reply = break_block(game, target) },
+                Phase::Break(p) => { let target = *p; *phase = Phase::Place(target); *reply = issue(game, &vec!["place".into(), target[0].to_string(), target[1].to_string(), target[2].to_string(), "--item".into(), seed.clone()]) },
+                Phase::Place(_) => { drop(slot); finish(game, true) },
+                _ => {},
+            },
         }
     });
 }
@@ -134,17 +156,122 @@ fn mapped(words: &[&str]) -> Option<Vec<String>> {
     Some(out)
 }
 
-pub(super) fn command(game: &mut Game<'_>, command: &str, ran: &mut bool) {
-    let words = command.split_whitespace().collect::<Vec<_>>();
+pub(super) fn command(game: &mut Game<'_>, line: &str, ran: &mut bool) {
+    let words = line.split_whitespace().collect::<Vec<_>>();
     let Some(words) = mapped(&words) else { return };
     *ran = true;
     if words.is_empty() { return }
+    if words[0] == "stop" {
+        JOB.with(|slot| *slot.borrow_mut() = None);
+    }
     match words[0].as_str() {
         "mine" if words.len() >= 2 => { let left = words.get(2).and_then(|s| s.parse().ok()).unwrap_or(1); let radius = words.get(3).and_then(|s| s.parse().ok()).unwrap_or(48); JOB.with(|slot| *slot.borrow_mut() = Some(Job::Mine { block: words[1].clone(), left, radius, phase: Phase::Find, reply: None })); next_phase(game) }
         "explore" => { let legs = words.get(1).and_then(|s| s.parse().ok()).unwrap_or(8); let length = words.get(2).and_then(|s| s.parse().ok()).unwrap_or(32); let origin = game.player.as_ref().map_or([0.0; 3], |p| [p.position.x, p.position.y, p.position.z]); JOB.with(|slot| *slot.borrow_mut() = Some(Job::Explore { origin, leg: 0, legs, length, reply: None })); next_phase(game) }
         "follow" => { let kind = words.get(1).cloned(); let left = words.get(2).and_then(|s| s.parse().ok()).unwrap_or(20); JOB.with(|slot| *slot.borrow_mut() = Some(Job::Follow { kind, left, phase: Phase::Entities, reply: None })); next_phase(game) }
+        "farm" if words.len() >= 2 => {
+            let crop = words[1].clone();
+            let seed = match crop.as_str() { "wheat" | "wheat_seeds" => "wheat_seeds", "carrots" | "carrot" => "carrot", "potatoes" | "potato" => "potato", "beetroots" | "beetroot" => "beetroot_seeds", _ => "" };
+            if seed.is_empty() { log::warn!("Sextant: unsupported crop {crop}"); return; }
+            let left = words.get(2).and_then(|s| s.parse().ok()).unwrap_or(16);
+            JOB.with(|slot| *slot.borrow_mut() = Some(Job::Farm { crop, seed: seed.into(), left, radius: 48, phase: Phase::Find, reply: None }));
+            next_phase(game);
+        }
+        "craft" if words.len() >= 2 => {
+            let recipe = words[1].as_str();
+            let commands = match recipe {
+                "planks" => vec![
+                    vec!["open-inventory".into()],
+                    vec!["click-slot".into(), "0".into()],
+                    vec!["click-slot".into(), "100".into(), "right".into()],
+                    vec!["click-slot".into(), "0".into()],
+                    vec!["wait".into(), "2".into()],
+                    vec!["click-slot".into(), "200".into(), "shift".into()],
+                    vec!["close".into()],
+                ],
+                "sticks" => vec![
+                    vec!["open-inventory".into()],
+                    vec!["click-slot".into(), "0".into()],
+                    vec!["click-slot".into(), "100".into(), "right".into()],
+                    vec!["click-slot".into(), "101".into(), "right".into()],
+                    vec!["click-slot".into(), "0".into()],
+                    vec!["wait".into(), "2".into()],
+                    vec!["click-slot".into(), "200".into(), "shift".into()],
+                    vec!["close".into()],
+                ],
+                _ => { log::warn!("Sextant: craft supports planks and sticks in the native client job layer"); Vec::new() },
+            };
+            if !commands.is_empty() {
+                JOB.with(|slot| *slot.borrow_mut() = Some(Job::Sequence { commands, index: 0, reply: None }));
+                next_phase(game);
+            }
+        }
+        "build" if words.len() >= 5 => {
+            let commands = vec![
+                vec!["select".into(), words[4].clone()],
+                vec!["goto".into(), words[1].clone(), words[2].clone(), words[3].clone(), "--near".into(), "2".into(), "--timeout".into(), "120".into()],
+                vec!["place".into(), words[1].clone(), words[2].clone(), words[3].clone(), "--item".into(), words[4].clone()],
+            ];
+            JOB.with(|slot| *slot.borrow_mut() = Some(Job::Sequence { commands, index: 0, reply: None }));
+            next_phase(game);
+        }
+        "portal" if words.len() >= 4 => {
+            let commands = vec![
+                vec!["goto".into(), words[1].clone(), words[2].clone(), words[3].clone(), "--near".into(), "1".into(), "--timeout".into(), "120".into()],
+                vec!["wait".into(), "200".into()],
+            ];
+            JOB.with(|slot| *slot.borrow_mut() = Some(Job::Sequence { commands, index: 0, reply: None }));
+            next_phase(game);
+        }
+        "task" if words.len() >= 2 => {
+            let nested = words[1..].join(" ");
+            let nested_line = format!("sextant {nested}");
+            command(game, &nested_line, ran);
+        }
         _ => { let refs = words.iter().map(String::as_str).collect::<Vec<_>>(); let line = refs.join(" "); let (sender, _) = channel(); match game.agent_command(&refs, &line, &sender, &NoopEventLoop) { Ok(Handled::No) => *ran = false, Ok(_) => log::info!("Sextant: running {}", refs[0]), Err(error) => log::warn!("Sextant: {error}") } }
     }
 }
 
 pub(super) fn tick(game: &mut Game<'_>) { poll(game); }
+
+pub(super) fn register_mod(mods: &mut Vec<super::native_hooks::NativeMod>) {
+    mods.push(super::native_hooks::NativeMod {
+        id: "sextant".into(),
+        title: "Sextant 0.1.0".into(),
+        description: "Baritone-style in-game navigation, jobs, farming, and building".into(),
+        keys: Vec::new(),
+    });
+}
+
+pub(super) fn register_settings(mod_id: &str, buttons: &mut Vec<String>) {
+    if mod_id == "sextant" {
+        buttons.push("Clear active job".into());
+    }
+}
+
+pub(super) fn settings_click(mod_id: &str, button: usize) {
+    if mod_id == "sextant" && button == 0 {
+        JOB.with(|slot| *slot.borrow_mut() = None);
+        log::info!("Sextant: cleared active job");
+    }
+}
+
+pub(super) fn draw_hud(
+    game: &mut Game<'_>,
+    batch: &mut horizon_client::hud::HudBatch,
+    corners: &mut horizon_client::extras_hud::Corners,
+) {
+    let label = JOB.with(|slot| {
+        let slot = slot.borrow();
+        slot.as_ref().map(|job| match job {
+            Job::Mine { .. } => "Sextant: mining",
+            Job::Explore { .. } => "Sextant: exploring",
+            Job::Follow { .. } => "Sextant: following",
+            Job::Sequence { .. } => "Sextant: running task",
+            Job::Farm { .. } => "Sextant: farming",
+        })
+    });
+    let Some(label) = label else { return };
+    let (x, y) = corners.place(horizon_client::extras::Corner::TopLeft, 180.0, 18.0);
+    game.native_fill(batch, [x, y, 180.0, 18.0], 0x90000000);
+    game.native_text(batch, label, [x + 5.0, y + 5.0], 0xFFFFFF00, true);
+}
