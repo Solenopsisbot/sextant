@@ -14,6 +14,8 @@ Examples:
 /sextant craft planks
 /sextant craft sticks
 /sextant farm wheat 16
+/sextant build 120 64 -40 cobblestone
+/sextant task go 120 64 -40
 /sextant mount 42
 /sextant mount --dismount
 /sextant elytra launch

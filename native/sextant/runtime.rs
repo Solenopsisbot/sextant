@@ -156,8 +156,8 @@ fn mapped(words: &[&str]) -> Option<Vec<String>> {
     Some(out)
 }
 
-pub(super) fn command(game: &mut Game<'_>, command: &str, ran: &mut bool) {
-    let words = command.split_whitespace().collect::<Vec<_>>();
+pub(super) fn command(game: &mut Game<'_>, line: &str, ran: &mut bool) {
+    let words = line.split_whitespace().collect::<Vec<_>>();
     let Some(words) = mapped(&words) else { return };
     *ran = true;
     if words.is_empty() { return }
@@ -204,6 +204,19 @@ pub(super) fn command(game: &mut Game<'_>, command: &str, ran: &mut bool) {
                 JOB.with(|slot| *slot.borrow_mut() = Some(Job::Sequence { commands, index: 0, reply: None }));
                 next_phase(game);
             }
+        }
+        "build" if words.len() >= 5 => {
+            let commands = vec![
+                vec!["goto".into(), words[1].clone(), words[2].clone(), words[3].clone(), "--near".into(), "2".into(), "--timeout".into(), "120".into()],
+                vec!["place".into(), words[1].clone(), words[2].clone(), words[3].clone(), "--item".into(), words[4].clone()],
+            ];
+            JOB.with(|slot| *slot.borrow_mut() = Some(Job::Sequence { commands, index: 0, reply: None }));
+            next_phase(game);
+        }
+        "task" if words.len() >= 2 => {
+            let nested = words[1..].join(" ");
+            let nested_line = format!("sextant {nested}");
+            command(game, &nested_line, ran);
         }
         _ => { let refs = words.iter().map(String::as_str).collect::<Vec<_>>(); let line = refs.join(" "); let (sender, _) = channel(); match game.agent_command(&refs, &line, &sender, &NoopEventLoop) { Ok(Handled::No) => *ran = false, Ok(_) => log::info!("Sextant: running {}", refs[0]), Err(error) => log::warn!("Sextant: {error}") } }
     }
