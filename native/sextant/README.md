@@ -11,6 +11,8 @@ Examples:
 /sextant mine diamond_ore 16 64
 /sextant explore 12 64
 /sextant follow minecraft:pig 20
+/sextant craft planks
+/sextant craft sticks
 /sextant stop
 /sextant jump
 /sextant break 120 64 -40
